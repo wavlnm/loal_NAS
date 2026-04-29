@@ -4,9 +4,11 @@ using System.Net.Sockets;
 
 namespace LoalNas.Host.Services;
 
+public readonly record struct Ipv6EndpointInfo(string Category, string Url);
+
 public static class Ipv6EndpointReporter
 {
-	public static void LogAvailableAddresses(ILogger logger, IEnumerable<string> boundUrls)
+	public static IReadOnlyList<Ipv6EndpointInfo> GetAvailableAddresses(IEnumerable<string> boundUrls)
 	{
 		var urls = boundUrls
 			.Select(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri : null)
@@ -15,20 +17,25 @@ public static class Ipv6EndpointReporter
 
 		var reportedUrls = urls
 			.Where(uri => IsSpecificIpv6Host(uri.Host))
-			.Select(uri => (Category: "Configured IPv6", Url: BuildUrl(uri.Scheme, uri.Host, uri.Port)))
+			.Select(uri => new Ipv6EndpointInfo("Configured IPv6", BuildUrl(uri.Scheme, uri.Host, uri.Port)))
 			.ToList();
 
 		foreach (var wildcardBinding in urls.Where(uri => IsWildcardIpv6Host(uri.Host)))
 		{
 			reportedUrls.AddRange(GetCandidateAddresses()
-				.Select(address => (Category: GetCategory(address), Url: BuildUrl(wildcardBinding.Scheme, address.ToString(), wildcardBinding.Port))));
+				.Select(address => new Ipv6EndpointInfo(GetCategory(address), BuildUrl(wildcardBinding.Scheme, address.ToString(), wildcardBinding.Port))));
 		}
 
-		var distinctUrls = reportedUrls
+		return reportedUrls
 			.DistinctBy(item => item.Url)
 			.OrderBy(item => CategoryOrder(item.Category))
 			.ThenBy(item => item.Url, StringComparer.OrdinalIgnoreCase)
 			.ToArray();
+	}
+
+	public static void LogAvailableAddresses(ILogger logger, IEnumerable<string> boundUrls)
+	{
+		var distinctUrls = GetAvailableAddresses(boundUrls).ToArray();
 
 		if (distinctUrls.Length == 0)
 		{

@@ -16,6 +16,8 @@
 8. 当前登录流程直接复用 FileBrowser 的 noauth 模式：`GET /api/filebrowser/login` 会返回 JWT，后续请求需要带上 `X-Auth: <token>`。
 9. 宿主启动后会在终端打印当前电脑可用的 IPv6 访问地址。
 10. 宿主启动时会检查 Windows 防火墙是否已放行对外监听端口；如果没有，会自动运行防火墙脚本尝试放行。
+11. 宿主启动后会打开一个最小桌面窗口，显示当前服务状态、绑定地址、IPv6 地址和共享目录。
+12. 窗口关闭即退出整个应用，并把 FileBrowser 一起关闭。
 
 ## 目录说明
 
@@ -26,10 +28,11 @@
 ## 运行方式
 
 1. 在仓库根目录执行 `dotnet run --project src/LoalNas.Host`。
-2. 宿主默认监听 `http://[::]:5034`，从其它设备访问时要写成 `http://[你的IPv6地址]:5034`。
-3. 访问 `GET /api/system/status` 确认宿主和 FileBrowser 都已启动。
-4. 先调用 `GET /api/filebrowser/login` 拿到 token。
-5. 手机端后续对接 `/api/filebrowser/*` 时，在请求头里带 `X-Auth: <token>`。
+2. 启动后会出现 `loal_NAS Host` 窗口；可以直接看当前宿主状态和 FileBrowser 状态。
+3. 宿主默认监听 `http://[::]:5034`，从其它设备访问时要写成 `http://[你的IPv6地址]:5034`。
+4. 访问 `GET /api/system/status` 确认宿主和 FileBrowser 都已启动。
+5. 先调用 `GET /api/filebrowser/login` 拿到 token。
+6. 手机端后续对接 `/api/filebrowser/*` 时，在请求头里带 `X-Auth: <token>`。
 
 说明：
 
@@ -39,6 +42,7 @@
 - 启动成功后，终端会直接打印可用 IPv6 URL，优先使用其中的 `Global IPv6` 或 `Unique local IPv6`。
 - 如果 5034 端口尚未放行，宿主会在启动时自动检查并尝试运行防火墙脚本。
 - 如果当前进程不是管理员权限，Windows 可能会弹出 UAC 提示来请求放行脚本提升权限。
+- 关闭桌面窗口等于退出应用；不需要再手动找宿主和 FileBrowser 两个进程分别结束。
 
 ## 防火墙脚本
 
