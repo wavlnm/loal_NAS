@@ -18,6 +18,7 @@
 10. 宿主启动时会检查 Windows 防火墙是否已放行对外监听端口；如果没有，会自动运行防火墙脚本尝试放行。
 11. 宿主启动后会打开一个最小桌面窗口，显示当前服务状态、绑定地址、IPv6 地址和共享目录。
 12. 窗口关闭即退出整个应用，并把 FileBrowser 一起关闭。
+13. 宿主新增了短时有效的媒体中转票据接口，供手机端把视频交给系统外部播放器打开，而不必把 `X-Auth` 直接暴露给外部应用。
 
 ## 目录说明
 
@@ -57,6 +58,7 @@
 - 登录取 token：`GET /api/filebrowser/login`
 - 文件列表：`GET /api/filebrowser/resources/`，并带 `X-Auth: <token>`
 - 文件上传：沿用 FileBrowser 原生上传接口，只是把前缀改成 `/api/filebrowser`
+- 外部视频播放中转：`POST /api/system/media-tickets`，带 `X-Auth: <token>` 和 JSON `{ "path": "/video.mp4" }`，返回短时有效的 `url`
 
 ## 为什么当前选择启动即常驻
 

@@ -81,6 +81,7 @@ internal static class Program
  		builder.Services.AddSingleton<FileBrowserProcessManager>();
 		builder.Services.AddHostedService(services => services.GetRequiredService<FileBrowserProcessManager>());
 		builder.Services.AddSingleton<FileBrowserApiProxy>();
+		builder.Services.AddSingleton<MediaRelayService>();
 		builder.Services.AddSingleton<WindowsFirewallRuleEnsurer>();
 
 		var app = builder.Build();
@@ -102,7 +103,8 @@ internal static class Program
 			endpoints = new
 			{
 				status = "/api/system/status",
-				fileBrowserApi = "/api/filebrowser/{...}"
+				fileBrowserApi = "/api/filebrowser/{...}",
+				mediaTicket = "/api/system/media-tickets"
 			}
 		}));
 
@@ -112,6 +114,41 @@ internal static class Program
 			fileBrowserBaseUrl = manager.BaseAddress.ToString(),
 			sharedRootPath = manager.SharedRootPath
 		}));
+
+		app.MapPost("/api/system/media-tickets",
+			(HttpContext context, CreateMediaRelayTicketRequest request, MediaRelayService relay) =>
+			{
+				var authToken = context.Request.Headers["X-Auth"].ToString().Trim();
+				if (string.IsNullOrEmpty(authToken))
+				{
+					return Results.Unauthorized();
+				}
+
+				try
+				{
+					var ticket = relay.CreateTicket(authToken, request.Path);
+					var url = $"{context.Request.Scheme}://{context.Request.Host}/api/system/media-open/{ticket.TicketId}";
+					return Results.Ok(new
+					{
+						url,
+						expiresAt = ticket.ExpiresAt
+					});
+				}
+				catch (ArgumentException exception)
+				{
+					return Results.BadRequest(new
+					{
+						error = "invalid_media_ticket_request",
+						detail = exception.Message
+					});
+				}
+			});
+
+		app.MapMethods("/api/system/media-open/{ticketId}", new[]
+		{
+			HttpMethods.Get,
+			HttpMethods.Head
+		}, (HttpContext context, string ticketId, MediaRelayService relay) => relay.ProxyMediaAsync(context, ticketId));
 
 		var proxyMethods = new[]
 		{
@@ -130,3 +167,5 @@ internal static class Program
 			(HttpContext context, string path, FileBrowserApiProxy proxy) => proxy.ProxyApiAsync(context, path));
 	}
 }
+
+internal sealed record CreateMediaRelayTicketRequest(string Path);
