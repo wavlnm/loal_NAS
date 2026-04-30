@@ -91,29 +91,46 @@ internal static class Program
 
 	private static void MapEndpoints(WebApplication app)
 	{
-		app.MapGet("/", (FileBrowserProcessManager manager) => Results.Ok(new
-	{
-			name = "loal_NAS MVP host",
-			fileBrowser = new
-			{
-				running = manager.IsRunning,
-				baseUrl = manager.BaseAddress.ToString(),
-				sharedRoot = manager.SharedRootPath
-			},
-			endpoints = new
-			{
-				status = "/api/system/status",
-				fileBrowserApi = "/api/filebrowser/{...}",
-				mediaTicket = "/api/system/media-tickets"
-			}
-		}));
-
-		app.MapGet("/api/system/status", (FileBrowserProcessManager manager) => Results.Ok(new
+		app.MapGet("/", (FileBrowserProcessManager manager) =>
 		{
-			fileBrowserRunning = manager.IsRunning,
-			fileBrowserBaseUrl = manager.BaseAddress.ToString(),
-			sharedRootPath = manager.SharedRootPath
-		}));
+			var storage = TryCreateStorageSnapshot(manager.SharedRootPath);
+			return Results.Ok(new
+			{
+				name = "loal_NAS MVP host",
+				fileBrowser = new
+				{
+					running = manager.IsRunning,
+					baseUrl = manager.BaseAddress.ToString(),
+					sharedRoot = manager.SharedRootPath
+				},
+				storage,
+				endpoints = new
+				{
+					status = "/api/system/status",
+					fileBrowserApi = "/api/filebrowser/{...}",
+					mediaTicket = "/api/system/media-tickets"
+				}
+			});
+		});
+
+		app.MapGet("/api/system/status", (FileBrowserProcessManager manager) =>
+		{
+			var storage = TryCreateStorageSnapshot(manager.SharedRootPath);
+			return Results.Ok(new
+			{
+				name = "loal_NAS MVP host",
+				fileBrowser = new
+				{
+					running = manager.IsRunning,
+					baseUrl = manager.BaseAddress.ToString(),
+					sharedRoot = manager.SharedRootPath
+				},
+				storage,
+				fileBrowserRunning = manager.IsRunning,
+				fileBrowserBaseUrl = manager.BaseAddress.ToString(),
+				sharedRootPath = manager.SharedRootPath
+			});
+		});
 
 		app.MapPost("/api/system/media-tickets",
 			(HttpContext context, CreateMediaRelayTicketRequest request, MediaRelayService relay) =>
@@ -166,6 +183,35 @@ internal static class Program
 		app.MapMethods("/api/filebrowser/{**path}", proxyMethods,
 			(HttpContext context, string path, FileBrowserApiProxy proxy) => proxy.ProxyApiAsync(context, path));
 	}
+
+	private static StorageSnapshot? TryCreateStorageSnapshot(string sharedRootPath)
+	{
+		try
+		{
+			var fullPath = Path.GetFullPath(sharedRootPath);
+			var driveRoot = Path.GetPathRoot(fullPath);
+			if (string.IsNullOrWhiteSpace(driveRoot))
+			{
+				return null;
+			}
+
+			var driveInfo = new DriveInfo(driveRoot);
+			if (!driveInfo.IsReady)
+			{
+				return null;
+			}
+
+			var totalBytes = driveInfo.TotalSize;
+			var freeBytes = driveInfo.TotalFreeSpace;
+			var usedBytes = totalBytes - freeBytes;
+			return new StorageSnapshot(driveInfo.Name, totalBytes, usedBytes, freeBytes);
+		}
+		catch
+		{
+			return null;
+		}
+	}
 }
 
 internal sealed record CreateMediaRelayTicketRequest(string Path);
+internal sealed record StorageSnapshot(string DriveName, long TotalBytes, long UsedBytes, long FreeBytes);
