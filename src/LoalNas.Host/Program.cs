@@ -10,7 +10,7 @@ namespace LoalNas.Host;
 internal static class Program
 {
 	[STAThread]
-	private static async Task Main(string[] args)
+	private static void Main(string[] args)
 	{
 		var app = BuildApplication(args);
 		var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("LoalNas.Host.Startup");
@@ -18,30 +18,43 @@ internal static class Program
 		var fileBrowserManager = app.Services.GetRequiredService<FileBrowserProcessManager>();
 		var appLifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
 		var deviceTracker = app.Services.GetRequiredService<ConnectedDeviceTracker>();
-		bool started = false;
+		var deviceIdentity = app.Services.GetRequiredService<DeviceIdentityService>();
 
-		try
+		// Start web host on a background thread so the main thread stays STA for WinForms/Clipboard
+		Exception? hostStartError = null;
+		string[]? boundUrls = null;
+		var hostReady = new System.Threading.ManualResetEventSlim(false);
+
+		var hostThread = Task.Run(async () =>
 		{
-			await app.StartAsync();
-			started = true;
-
-			var boundUrls = app.Urls.ToArray();
-			Ipv6EndpointReporter.LogAvailableAddresses(startupLogger, boundUrls);
-			_ = firewallEnsurer.EnsureRulesForUrlsAsync(boundUrls);
-
-			ApplicationConfiguration.Initialize();
-			using var form = new HostStatusForm(fileBrowserManager, appLifetime, deviceTracker, boundUrls);
-			Application.Run(form);
-		}
-		finally
-		{
-			if (started)
+			try
 			{
-				await app.StopAsync();
+				await app.StartAsync();
+				boundUrls = app.Urls.ToArray();
+				hostReady.Set();
+				await app.WaitForShutdownAsync();
 			}
+			catch (Exception ex)
+			{
+				hostStartError = ex;
+				hostReady.Set();
+			}
+		});
 
-			await app.DisposeAsync();
-		}
+		hostReady.Wait();
+
+		if (hostStartError != null)
+			throw new InvalidOperationException("Web host failed to start.", hostStartError);
+
+		Ipv6EndpointReporter.LogAvailableAddresses(startupLogger, boundUrls!);
+		_ = firewallEnsurer.EnsureRulesForUrlsAsync(boundUrls!);
+
+		ApplicationConfiguration.Initialize();
+		using var form = new HostStatusForm(fileBrowserManager, appLifetime, deviceTracker, deviceIdentity, boundUrls!);
+		Application.Run(form);
+
+		app.StopAsync().GetAwaiter().GetResult();
+		app.DisposeAsync().GetAwaiter().GetResult();
 	}
 
  	private static WebApplication BuildApplication(string[] args)
@@ -94,6 +107,7 @@ internal static class Program
 		builder.Services.AddSingleton<MediaRelayService>();
 		builder.Services.AddSingleton<WindowsFirewallRuleEnsurer>();
 		builder.Services.AddSingleton<ConnectedDeviceTracker>();
+		builder.Services.AddSingleton<DeviceIdentityService>();
 
 		var app = builder.Build();
 		MapEndpoints(app);

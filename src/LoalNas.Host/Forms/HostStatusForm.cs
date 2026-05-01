@@ -1,63 +1,64 @@
-using LoalNas.Host.Services;
-using Microsoft.Extensions.Hosting;
+using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Net;
 using System.Windows.Forms;
+using LoalNas.Host.Services;
+using Microsoft.Extensions.Hosting;
 
 namespace LoalNas.Host.Forms;
 
 public sealed class HostStatusForm : Form
 {
-	// ── 配色 ────────────────────────────────────────────────────────────────
-	private static readonly Color CBg          = Color.FromArgb(248, 249, 250);
-	private static readonly Color CCard        = Color.White;
-	private static readonly Color CBorder      = Color.FromArgb(222, 226, 230);
-	private static readonly Color CTextPrimary = Color.FromArgb(33,  37,  41);
-	private static readonly Color CTextMuted   = Color.FromArgb(108, 117, 125);
-	private static readonly Color CAccent      = Color.FromArgb(13,  110, 253);
-	private static readonly Color CSuccess     = Color.FromArgb(25,  135, 84);
-	private static readonly Color CDanger      = Color.FromArgb(220, 53,  69);
-	private static readonly Color CWarning     = Color.FromArgb(180, 130, 0);
+	private static readonly Color CBg = Color.FromArgb(246, 248, 252);
+	private static readonly Color CCard = Color.White;
+	private static readonly Color CBorder = Color.FromArgb(230, 234, 242);
+	private static readonly Color CTextPrimary = Color.FromArgb(28, 32, 40);
+	private static readonly Color CTextMuted = Color.FromArgb(114, 124, 138);
+	private static readonly Color CAccent = Color.FromArgb(49, 107, 255);
+	private static readonly Color CAccentSoft = Color.FromArgb(239, 245, 255);
+	private static readonly Color CSuccess = Color.FromArgb(26, 162, 104);
+	private static readonly Color CSuccessSoft = Color.FromArgb(232, 249, 240);
+	private static readonly Color CWarning = Color.FromArgb(201, 127, 39);
+	private static readonly Color CWarningSoft = Color.FromArgb(255, 244, 230);
+	private static readonly Color CDanger = Color.FromArgb(210, 78, 91);
+	private static readonly Color CDangerSoft = Color.FromArgb(253, 239, 242);
+	private const int LeftW = 550;
+	private const int RightW = 600;
 
-	// ── 布局常量 ─────────────────────────────────────────────────────────────
-	private const int LeftW  = 240;   // 左栏控件宽度
-	private const int RightW = 540;   // 右栏控件宽度（保守值，实际可用 ~552px）
-
-	// ── 依赖 ─────────────────────────────────────────────────────────────────
 	private readonly FileBrowserProcessManager _fileBrowserManager;
-	private readonly IHostApplicationLifetime  _applicationLifetime;
-	private readonly ConnectedDeviceTracker    _deviceTracker;
-	private readonly string[]                  _boundUrls;
+	private readonly IHostApplicationLifetime _applicationLifetime;
+	private readonly ConnectedDeviceTracker _deviceTracker;
+	private readonly DeviceIdentityService _deviceIdentity;
+	private readonly string[] _boundUrls;
 	private readonly System.Windows.Forms.Timer _refreshTimer;
-
-	// ── 网络信息（启动时读取一次） ───────────────────────────────────────────
-	private readonly IPAddress?            _stableIpv6;
+	private readonly IPAddress? _stableIpv6;
 	private readonly IReadOnlyList<IPAddress> _lanIpv4;
-	private ConnectivityState              _ipv6State;
 
-	// ── 需要动态刷新的控件 ───────────────────────────────────────────────────
-	private Label  _ipv6StatusLabel  = null!;
-	private Label  _storageTextLabel = null!;
-	private Panel  _storageFillPanel = null!;
-	private Panel  _storageBarBg     = null!;
-	private Label  _devicesLabel     = null!;
+	private Label _ipv6StatusLabel = null!;
+	private Label _storageUsageLabel = null!;
+	private Label _storagePercentLabel = null!;
+	private Panel _storageFillPanel = null!;
+	private Panel _storageBarBg = null!;
+	private FlowLayoutPanel _devicesListPanel = null!;
 
 	private enum ConnectivityState { Testing, Ready, NotReady, NoAddress }
 
 	public HostStatusForm(
 		FileBrowserProcessManager fileBrowserManager,
-		IHostApplicationLifetime  applicationLifetime,
-		ConnectedDeviceTracker    deviceTracker,
-		IEnumerable<string>       boundUrls)
+		IHostApplicationLifetime applicationLifetime,
+		ConnectedDeviceTracker deviceTracker,
+		DeviceIdentityService deviceIdentity,
+		IEnumerable<string> boundUrls)
 	{
 		_fileBrowserManager = fileBrowserManager;
 		_applicationLifetime = applicationLifetime;
-		_deviceTracker       = deviceTracker;
-		_boundUrls           = boundUrls.ToArray();
+		_deviceTracker = deviceTracker;
+		_deviceIdentity = deviceIdentity;
+		_boundUrls = boundUrls.ToArray();
 
 		_stableIpv6 = NetworkInfoService.GetStablePublicIpv6();
-		_lanIpv4    = NetworkInfoService.GetLanIpv4Addresses();
-		_ipv6State  = _stableIpv6 is null ? ConnectivityState.NoAddress : ConnectivityState.Testing;
+		_lanIpv4 = NetworkInfoService.GetLanIpv4Addresses();
 
 		InitializeComponent();
 
@@ -65,7 +66,7 @@ public sealed class HostStatusForm : Form
 		_refreshTimer.Tick += (_, _) => RefreshDynamic();
 		_applicationLifetime.ApplicationStopping.Register(CloseFromHostThread);
 
-		Shown     += OnShown;
+		Shown += OnShown;
 		FormClosed += (_, _) => _refreshTimer.Stop();
 	}
 
@@ -76,241 +77,273 @@ public sealed class HostStatusForm : Form
 		await TestIpv6ConnectivityAsync();
 	}
 
-	// ── 界面构建 ─────────────────────────────────────────────────────────────
 	private void InitializeComponent()
 	{
-		Text            = "loal_NAS";
-		StartPosition   = FormStartPosition.CenterScreen;
-		ClientSize      = new Size(840, 500);
+		Text = "千私云";
+		StartPosition = FormStartPosition.CenterScreen;
+		ClientSize = new Size(1230, 770);
+		MinimumSize = new Size(1230, 770);
 		FormBorderStyle = FormBorderStyle.FixedSingle;
-		MaximizeBox     = false;
-		MinimizeBox     = true;
-		ShowIcon        = false;
-		BackColor       = CBg;
-		Font            = new Font("Segoe UI", 9f);
+		MaximizeBox = false;
+		MinimizeBox = true;
+		ShowIcon = false;
+		BackColor = CBg;
+		Font = new Font("Segoe UI", 9f);
 
-		var table = new TableLayoutPanel
+		var root = new TableLayoutPanel
 		{
-			Dock        = DockStyle.Fill,
-			ColumnCount = 2,
-			RowCount    = 1,
-			Padding     = new Padding(24, 20, 24, 20),
-			BackColor   = CBg,
+			Dock = DockStyle.Fill,
+			BackColor = CBg,
+			Padding = new Padding(24, 24, 24, 24),
+			RowCount = 2,
+			ColumnCount = 1,
 		};
-		table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, LeftW));
-		table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-		table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-		table.Controls.Add(BuildLeftPanel(),  0, 0);
-		table.Controls.Add(BuildRightPanel(), 1, 0);
-		Controls.Add(table);
+		root.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
+		root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+		var body = new TableLayoutPanel
+		{
+			Dock = DockStyle.Fill,
+			BackColor = CBg,
+			ColumnCount = 2,
+			Margin = new Padding(0),
+		};
+		body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, LeftW + 32));
+		body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, RightW));
+		body.Controls.Add(BuildLeftColumn(), 0, 0);
+		body.Controls.Add(BuildRightColumn(), 1, 0);
+
+		root.Controls.Add(BuildHeader(), 0, 0);
+		root.Controls.Add(body, 0, 1);
+		Controls.Add(root);
 	}
 
-	// ── 左栏：二维码占位 + 共享目录 ─────────────────────────────────────────
-	private Panel BuildLeftPanel()
+	private Panel BuildHeader()
 	{
-		var panel = new Panel { Dock = DockStyle.Fill, BackColor = CBg };
+		var panel = new Panel { Dock = DockStyle.Fill, BackColor = CBg, Margin = new Padding(0, 0, 0, 12) };
 
-		// 标题
+		var textFlow = new FlowLayoutPanel
+		{
+			FlowDirection = FlowDirection.TopDown,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			BackColor = CBg,
+			WrapContents = false,
+			Location = new Point(0, 0),
+			Margin = new Padding(0),
+			Padding = new Padding(0),
+		};
+
 		var title = new Label
 		{
-			Text      = "loal_NAS",
-			Font      = new Font("Segoe UI", 16f, FontStyle.Bold),
+			Text = "千私云",
+			Font = new Font("Segoe UI", 20f, FontStyle.Bold),
 			ForeColor = CTextPrimary,
-			AutoSize  = true,
-			Location  = new Point(0, 0),
+			AutoSize = true,
+			Margin = new Padding(0, 0, 0, 2),
 		};
 
-		// 二维码占位卡片
-		var qrCard = new Panel
+		var subtitle = new Label
 		{
-			Width     = LeftW,
-			Height    = LeftW,
-			BackColor = CCard,
-			Location  = new Point(0, 44),
-		};
-		qrCard.Paint += (_, e) =>
-		{
-			using var pen = new Pen(CBorder);
-			e.Graphics.DrawRectangle(pen, 0, 0, qrCard.Width - 1, qrCard.Height - 1);
-		};
-		var qrPlaceholder = new Label
-		{
-			Text      = "二维码\n（云端接口就绪后\n自动生成）",
+			Text = "你的电脑，随时可用的私有云存储中心",
+			Font = new Font("Segoe UI", 10f),
 			ForeColor = CTextMuted,
-			TextAlign = ContentAlignment.MiddleCenter,
-			Dock      = DockStyle.Fill,
-		};
-		qrCard.Controls.Add(qrPlaceholder);
-
-		var qrHint = new Label
-		{
-			Text      = "手机端扫码快速连接",
-			ForeColor = CTextMuted,
-			Font      = new Font("Segoe UI", 8f),
-			AutoSize  = true,
-			Location  = new Point(0, 44 + LeftW + 6),
+			AutoSize = true,
+			Margin = new Padding(0),
 		};
 
-		// 共享目录卡片
-		var dirCard = BuildCard();
-		dirCard.Location = new Point(0, 44 + LeftW + 30);
-		dirCard.Height   = 90;
-		dirCard.Width    = LeftW;
+		textFlow.Controls.AddRange(new Control[] { title, subtitle });
 
-		var dirCaption = MakeCaption("云空间根目录");
-		dirCaption.Location = new Point(12, 10);
+		var openWebButton = CreateOutlineButton("访问 Web 管理", 168, 40);
+		openWebButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+		openWebButton.Location = new Point(1022, 8);
+		openWebButton.Click += (_, _) => OpenUrl(_fileBrowserManager.BaseAddress.ToString());
 
-		var dirPath = new Label
-		{
-			Text      = _fileBrowserManager.SharedRootPath,
-			ForeColor = CTextPrimary,
-			Font      = new Font("Segoe UI", 8.5f),
-			AutoSize  = false,
-			Width     = LeftW - 24,
-			Height    = 48,
-			Location  = new Point(12, 32),
-		};
-
-		var copyBtn = new Button
-		{
-			Text      = "复制",
-			FlatStyle = FlatStyle.Flat,
-			Font      = new Font("Segoe UI", 8f),
-			Width     = 40,
-			Height    = 22,
-			Location  = new Point(LeftW - 52, 8),
-			ForeColor = CAccent,
-			BackColor = CCard,
-		};
-		copyBtn.FlatAppearance.BorderSize = 0;
-		copyBtn.Click += (_, _) => Clipboard.SetText(_fileBrowserManager.SharedRootPath);
-
-		dirCard.Controls.AddRange(new Control[] { dirCaption, dirPath, copyBtn });
-
-		// 关闭按钮
-		var closeBtn = new Button
-		{
-			Text      = "关闭应用",
-			Width     = LeftW,
-			Height    = 34,
-			Location  = new Point(0, 44 + LeftW + 136),
-			BackColor = CDanger,
-			ForeColor = Color.White,
-			FlatStyle = FlatStyle.Flat,
-			Font      = new Font("Segoe UI", 9f),
-		};
-		closeBtn.FlatAppearance.BorderSize = 0;
-		closeBtn.Click += (_, _) => Close();
-
-		panel.Controls.AddRange(new Control[] { title, qrCard, qrHint, dirCard, closeBtn });
+		panel.Controls.AddRange(new Control[] { textFlow, openWebButton });
 		return panel;
 	}
 
-	// ── 右栏：网络地址 + 存储 + 已连接设备 ──────────────────────────────────
-	private Panel BuildRightPanel()
+	private Panel BuildLeftColumn()
 	{
-		var panel = new Panel { Dock = DockStyle.Fill, BackColor = CBg, Padding = new Padding(20, 0, 0, 0) };
+		var panel = new Panel { Dock = DockStyle.Fill, BackColor = CBg, Margin = new Padding(0) };
 
-		int x = 20;
+		var deviceCard = BuildCard(LeftW, 350);
+		deviceCard.Location = new Point(0, 0);
+		deviceCard.Controls.Add(MakeSectionTitle("设备绑定", "使用手机客户端扫码绑定设备", 20, 20));
 
-		// ── 网络地址卡片 ────────────────────────────────────────────────────
-		var netCard = BuildCard();
-		netCard.Location = new Point(x, 0);
-		netCard.Width    = RightW;
-		netCard.Height   = 164;
+		var qrShell = new Panel
+		{
+			Location = new Point(24, 92),
+			Size = new Size(168, 168),
+			BackColor = Color.White,
+		};
+		ApplyRoundedRegion(qrShell, 22);
+		qrShell.Paint += (_, e) => DrawRoundedBorder(e, qrShell.ClientRectangle, 22, CBorder);
 
-		netCard.Controls.Add(MakeCaption("网络地址", 12, 10));
+		var qrPlaceholder = new Label
+		{
+			Text = "二维码\n待接入",
+			ForeColor = CTextMuted,
+			Dock = DockStyle.Fill,
+			TextAlign = ContentAlignment.MiddleCenter,
+			Font = new Font("Segoe UI", 11f, FontStyle.Bold),
+		};
+		qrShell.Controls.Add(qrPlaceholder);
 
-		int ny = 36;
-		// 公网 IPv6
-		var ipv6Row = BuildAddressRow(
-			"公网 IPv6",
-			_stableIpv6?.ToString() ?? "未检测到稳定公网 IPv6 地址",
-			12, ny);
-		_ipv6StatusLabel = (Label)ipv6Row.Controls[2];
-		netCard.Controls.Add(ipv6Row);
-		ny += 44;
+		deviceCard.Controls.Add(qrShell);
+		deviceCard.Controls.Add(BuildInfoPair("设备名称", _deviceIdentity.DeviceName, 222, 102, 304, 34, 13f, false));
+		deviceCard.Controls.Add(BuildInfoPair("设备 ID", _deviceIdentity.DeviceId, 222, 174, 260, 56, 10.2f, true));
 
-		// 局域网 IPv4（可能多个）
+		var copyDeviceIdButton = CreateIconButton();
+		copyDeviceIdButton.Location = new Point(490, 201);
+		copyDeviceIdButton.Click += (_, _) => CopyToClipboard(_deviceIdentity.DeviceId);
+
+		var openWebMiniButton = CreateFilledButton("打开管理页", 304, 38);
+		openWebMiniButton.Location = new Point(222, 280);
+		openWebMiniButton.Click += (_, _) => OpenUrl(_fileBrowserManager.BaseAddress.ToString());
+
+		deviceCard.Controls.AddRange(new Control[] { copyDeviceIdButton, openWebMiniButton });
+
+		var storageCard = BuildCard(LeftW, 252);
+		storageCard.Location = new Point(0, 374);
+		storageCard.Controls.Add(MakeSectionTitle("云空间根目录", "该目录与可用空间信息会实时刷新", 20, 20));
+
+		var pathBox = new Panel
+		{
+			Location = new Point(20, 92),
+			Size = new Size(510, 60),
+			BackColor = CAccentSoft,
+		};
+		ApplyRoundedRegion(pathBox, 16);
+		pathBox.Paint += (_, e) => DrawRoundedBorder(e, pathBox.ClientRectangle, 16, Color.FromArgb(215, 228, 255));
+
+		var pathLabel = new Label
+		{
+			Text = _fileBrowserManager.SharedRootPath,
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 9f),
+			AutoEllipsis = true,
+			Size = new Size(432, 36),
+			Location = new Point(16, 13),
+			TextAlign = ContentAlignment.MiddleLeft,
+		};
+
+		var copyPathButton = CreateIconButton();
+		copyPathButton.Location = new Point(462, 14);
+		copyPathButton.Click += (_, _) => CopyToClipboard(_fileBrowserManager.SharedRootPath);
+
+		pathBox.Controls.AddRange(new Control[] { pathLabel, copyPathButton });
+		storageCard.Controls.Add(pathBox);
+
+		_storageUsageLabel = new Label
+		{
+			Text = "读取中...",
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+			AutoSize = false,
+			Size = new Size(446, 24),
+			Location = new Point(20, 170),
+		};
+
+		_storagePercentLabel = new Label
+		{
+			Text = "0%",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9f),
+			AutoSize = true,
+			Location = new Point(494, 170),
+		};
+
+		_storageBarBg = new Panel
+		{
+			Location = new Point(20, 202),
+			Size = new Size(510, 10),
+			BackColor = Color.FromArgb(234, 238, 244),
+		};
+		ApplyRoundedRegion(_storageBarBg, 5);
+
+		_storageFillPanel = new Panel
+		{
+			Location = new Point(0, 0),
+			Size = new Size(0, 10),
+			BackColor = CAccent,
+		};
+		ApplyRoundedRegion(_storageFillPanel, 5);
+		_storageBarBg.Controls.Add(_storageFillPanel);
+		storageCard.Controls.AddRange(new Control[] { _storageUsageLabel, _storagePercentLabel, _storageBarBg });
+
+		panel.Controls.AddRange(new Control[] { deviceCard, storageCard });
+		return panel;
+	}
+
+	private Panel BuildRightColumn()
+	{
+		var panel = new Panel { Dock = DockStyle.Fill, BackColor = CBg, Margin = new Padding(0) };
+
+		var networkCard = BuildCard(RightW, 350);
+		networkCard.Location = new Point(0, 0);
+		networkCard.Controls.Add(MakeSectionTitle("设备地址", "用于局域网和公网访问的地址", 20, 20));
+
+		int top = 92;
+		var ipv6Row = BuildAddressRow("公网 IPv6 地址", _stableIpv6?.ToString() ?? "未检测到稳定公网 IPv6 地址", _stableIpv6?.ToString(), true);
+		ipv6Row.Location = new Point(20, top);
+		networkCard.Controls.Add(ipv6Row);
+		top += 70;
+
 		if (_lanIpv4.Count == 0)
 		{
-			var row = BuildAddressRow("局域网 IPv4", "未检测到局域网地址", 12, ny);
-			netCard.Controls.Add(row);
+			var noIpv4Row = BuildAddressRow("局域网地址", "未检测到局域网 IPv4 地址", null, false);
+			noIpv4Row.Location = new Point(20, top);
+			networkCard.Controls.Add(noIpv4Row);
 		}
 		else
 		{
 			foreach (var ip in _lanIpv4.Take(2))
 			{
-				var row = BuildAddressRow("局域网 IPv4", ip.ToString(), 12, ny);
-				netCard.Controls.Add(row);
-				ny += 44;
+				var row = BuildAddressRow("局域网地址", ip.ToString(), ip.ToString(), false);
+				row.Location = new Point(20, top);
+				networkCard.Controls.Add(row);
+				top += 70;
 			}
 		}
 
-		// ── 存储卡片 ────────────────────────────────────────────────────────
-		var stgCard = BuildCard();
-		stgCard.Location = new Point(x, 180);
-		stgCard.Width    = RightW;
-		stgCard.Height   = 100;
-		stgCard.Controls.Add(MakeCaption("存储空间", 12, 10));
-
-		_storageTextLabel = new Label
+		var networkHint = new Label
 		{
-			Text      = "读取中…",
+			Text = "设备地址可能发生改变，建议登录客户端以实时同步最新地址。",
 			ForeColor = CTextMuted,
-			Font      = new Font("Segoe UI", 8.5f),
-			AutoSize  = true,
-			Location  = new Point(12, 34),
+			Font = new Font("Segoe UI", 8.5f),
+			AutoSize = false,
+			Size = new Size(RightW - 40, 20),
+			Location = new Point(20, 300),
 		};
+		networkCard.Controls.Add(networkHint);
 
-		_storageBarBg = new Panel
+		var devicesCard = BuildCard(RightW, 252);
+		devicesCard.Location = new Point(0, 374);
+		devicesCard.Controls.Add(MakeSectionTitle("最近连接设备", "显示最近 5 分钟内有访问记录的客户端", 20, 20));
+
+		_devicesListPanel = new FlowLayoutPanel
 		{
-			BackColor = CBorder,
-			Height    = 6,
-			Width     = RightW - 24,
-			Location  = new Point(12, 60),
+			Location = new Point(20, 88),
+			Size = new Size(RightW - 40, 128),
+			FlowDirection = FlowDirection.TopDown,
+			WrapContents = false,
+			AutoScroll = true,
+			BackColor = CCard,
+			Margin = new Padding(0),
+			Padding = new Padding(0),
 		};
-		_storageFillPanel = new Panel
-		{
-			BackColor = CAccent,
-			Height    = 6,
-			Width     = 0,
-			Location  = new Point(0, 0),
-		};
-		_storageBarBg.Controls.Add(_storageFillPanel);
+		devicesCard.Controls.Add(_devicesListPanel);
 
-		stgCard.Controls.AddRange(new Control[] { _storageTextLabel, _storageBarBg });
-
-		// ── 已连接设备卡片 ───────────────────────────────────────────────────
-		var devCard = BuildCard();
-		devCard.Location = new Point(x, 296);
-		devCard.Width    = RightW;
-		devCard.Height   = 164;
-		devCard.Controls.Add(MakeCaption("最近连接设备", 12, 10));
-
-		_devicesLabel = new Label
-		{
-			Text      = "暂无连接记录",
-			ForeColor = CTextMuted,
-			Font      = new Font("Segoe UI", 8.5f),
-			AutoSize  = false,
-			Width     = RightW - 24,
-			Height    = 120,
-			Location  = new Point(12, 34),
-		};
-		devCard.Controls.Add(_devicesLabel);
-
-		panel.Controls.AddRange(new Control[] { netCard, stgCard, devCard });
+		panel.Controls.AddRange(new Control[] { networkCard, devicesCard });
 		return panel;
 	}
 
-	// ── 动态刷新 ─────────────────────────────────────────────────────────────
 	private void RefreshDynamic()
 	{
-		// 存储
 		try
 		{
-			var root      = Path.GetFullPath(_fileBrowserManager.SharedRootPath);
+			var root = Path.GetFullPath(_fileBrowserManager.SharedRootPath);
 			var driveRoot = Path.GetPathRoot(root);
 			if (driveRoot != null)
 			{
@@ -318,40 +351,50 @@ public sealed class HostStatusForm : Form
 				if (drive.IsReady)
 				{
 					double total = drive.TotalSize;
-					double free  = drive.TotalFreeSpace;
-					double used  = total - free;
-					int pct      = (int)(used / total * 100);
-					_storageTextLabel.Text      = $"{FormatBytes(used)} / {FormatBytes(total)} 已使用  ({pct}%)";
-					_storageFillPanel.Width     = (int)(_storageBarBg.Width * pct / 100.0);
-					_storageFillPanel.BackColor = pct > 90 ? CDanger : pct > 70 ? CWarning : CAccent;
+					double used = total - drive.TotalFreeSpace;
+					int pct = total > 0 ? (int)Math.Round(used / total * 100, MidpointRounding.AwayFromZero) : 0;
+					_storageUsageLabel.Text = $"已使用 {FormatBytes(used)} / {FormatBytes(total)}";
+					_storagePercentLabel.Text = $"{pct}%";
+					_storageFillPanel.Width = Math.Max(0, Math.Min(_storageBarBg.Width, (int)Math.Round(_storageBarBg.Width * pct / 100d)));
+					_storageFillPanel.BackColor = pct >= 90 ? CDanger : pct >= 70 ? CWarning : CAccent;
 				}
 			}
 		}
-		catch { /* 忽略 */ }
+		catch
+		{
+			_storageUsageLabel.Text = "无法读取磁盘空间信息";
+			_storagePercentLabel.Text = "--";
+			_storageFillPanel.Width = 0;
+		}
 
-		// 已连接设备
+		RefreshDevicesList();
+	}
+
+	private void RefreshDevicesList()
+	{
+		_devicesListPanel.SuspendLayout();
+		_devicesListPanel.Controls.Clear();
+
 		var devices = _deviceTracker.GetActiveDevices();
 		if (devices.Count == 0)
 		{
-			_devicesLabel.Text      = "暂无连接记录（最近 5 分钟内无请求）";
-			_devicesLabel.ForeColor = CTextMuted;
+			_devicesListPanel.Controls.Add(BuildEmptyDeviceState());
+			_devicesListPanel.ResumeLayout();
+			return;
 		}
-		else
+
+		foreach (var device in devices.Take(5))
 		{
-			var lines = devices.Select(d =>
-			{
-				var ago = DateTimeOffset.UtcNow - d.LastSeen;
-				var agoText = ago.TotalSeconds < 60
-					? $"{(int)ago.TotalSeconds} 秒前"
-					: $"{(int)ago.TotalMinutes} 分钟前";
-				return $"{d.IpAddress}  （{agoText}）";
-			});
-			_devicesLabel.Text      = string.Join(Environment.NewLine, lines);
-			_devicesLabel.ForeColor = CTextPrimary;
+			var elapsed = DateTimeOffset.UtcNow - device.LastSeen;
+			var agoText = elapsed.TotalSeconds < 60
+				? $"{Math.Max(1, (int)elapsed.TotalSeconds)} 秒前"
+				: $"{Math.Max(1, (int)elapsed.TotalMinutes)} 分钟前";
+			_devicesListPanel.Controls.Add(BuildDeviceItem(device.IpAddress, agoText));
 		}
+
+		_devicesListPanel.ResumeLayout();
 	}
 
-	// ── 公网 IPv6 连通性测试 ──────────────────────────────────────────────────
 	private async Task TestIpv6ConnectivityAsync()
 	{
 		if (_stableIpv6 is null)
@@ -363,17 +406,11 @@ public sealed class HostStatusForm : Form
 		SetIpv6Badge(ConnectivityState.Testing);
 		try
 		{
-			// 用宿主绑定的端口对本机 IPv6 发一次 HTTP GET
-			var port    = GetBoundPort();
+			var port = GetBoundPort();
 			var testUrl = $"http://[{_stableIpv6}]:{port}/api/system/status";
-			using var client = new System.Net.Http.HttpClient
-			{
-				Timeout = TimeSpan.FromSeconds(6)
-			};
-			var resp = await client.GetAsync(testUrl);
-			SetIpv6Badge(resp.IsSuccessStatusCode
-				? ConnectivityState.Ready
-				: ConnectivityState.NotReady);
+			using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+			var response = await client.GetAsync(testUrl);
+			SetIpv6Badge(response.IsSuccessStatusCode ? ConnectivityState.Ready : ConnectivityState.NotReady);
 		}
 		catch
 		{
@@ -383,20 +420,24 @@ public sealed class HostStatusForm : Form
 
 	private void SetIpv6Badge(ConnectivityState state)
 	{
-		_ipv6State = state;
 		if (_ipv6StatusLabel.InvokeRequired)
 		{
 			_ipv6StatusLabel.BeginInvoke(() => SetIpv6Badge(state));
 			return;
 		}
-		(_ipv6StatusLabel.Text, _ipv6StatusLabel.ForeColor) = state switch
+
+		var (text, foreColor, backColor) = state switch
 		{
-			ConnectivityState.Testing   => ("测试中…",  CTextMuted),
-			ConnectivityState.Ready     => ("已就绪",   CSuccess),
-			ConnectivityState.NotReady  => ("未就绪",   CDanger),
-			ConnectivityState.NoAddress => ("无地址",   CTextMuted),
-			_                           => ("",          CTextMuted),
+			ConnectivityState.Testing => ("测试中", CTextMuted, Color.FromArgb(243, 245, 248)),
+			ConnectivityState.Ready => ("已就绪", CSuccess, CSuccessSoft),
+			ConnectivityState.NotReady => ("未就绪", CDanger, CDangerSoft),
+			ConnectivityState.NoAddress => ("无地址", CTextMuted, Color.FromArgb(243, 245, 248)),
+			_ => (string.Empty, CTextMuted, Color.FromArgb(243, 245, 248)),
 		};
+
+		_ipv6StatusLabel.Text = text;
+		_ipv6StatusLabel.ForeColor = foreColor;
+		_ipv6StatusLabel.BackColor = backColor;
 	}
 
 	private int GetBoundPort()
@@ -404,78 +445,360 @@ public sealed class HostStatusForm : Form
 		foreach (var url in _boundUrls)
 		{
 			if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+			{
 				return uri.Port;
+			}
 		}
+
 		return 5034;
 	}
 
-	// ── 卡片和控件工厂 ────────────────────────────────────────────────────────
-	private static Panel BuildCard()
+	private static Panel BuildCard(int width, int height)
 	{
-		var p = new Panel { BackColor = CCard };
-		p.Paint += (_, e) =>
+		var panel = new Panel
 		{
-			using var pen = new Pen(CBorder);
-			e.Graphics.DrawRectangle(pen, 0, 0, p.Width - 1, p.Height - 1);
+			Size = new Size(width, height),
+			BackColor = CCard,
+			Margin = new Padding(0),
 		};
-		return p;
+		ApplyRoundedRegion(panel, 24);
+		panel.Paint += (_, e) => DrawRoundedBorder(e, panel.ClientRectangle, 24, CBorder);
+		return panel;
 	}
 
-	private static Label MakeCaption(string text, int x = 0, int y = 0)
+	private static Control MakeSectionTitle(string title, string subtitle, int x, int y)
 	{
-		return new Label
+		var flow = new FlowLayoutPanel
 		{
-			Text      = text,
-			Font      = new Font("Segoe UI", 9f, FontStyle.Bold),
+			Location = new Point(x, y),
+			FlowDirection = FlowDirection.TopDown,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			WrapContents = false,
+			BackColor = Color.Transparent,
+			Margin = new Padding(0),
+			Padding = new Padding(0),
+		};
+
+		var titleLabel = new Label
+		{
+			Text = title,
 			ForeColor = CTextPrimary,
-			AutoSize  = true,
-			Location  = new Point(x, y),
+			Font = new Font("Segoe UI", 15f, FontStyle.Bold),
+			AutoSize = true,
+			Margin = new Padding(0, 0, 0, 1),
 		};
+
+		var subtitleLabel = new Label
+		{
+			Text = subtitle,
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9f),
+			AutoSize = true,
+			Margin = new Padding(0),
+		};
+
+		flow.Controls.AddRange(new Control[] { titleLabel, subtitleLabel });
+		return flow;
 	}
 
-	/// <summary>
-	/// 一行地址：左侧灰色标签 + 中间地址 + 右侧状态徽章（仅 IPv6 行使用）。
-	/// </summary>
-	private static Panel BuildAddressRow(string caption, string address, int x, int y)
+	private static Control BuildInfoPair(string caption, string value, int x, int y, int width, int valueHeight, float valueFontSize, bool multiline)
+	{
+		var wrapper = new Panel
+		{
+			Location = new Point(x, y),
+			Size = new Size(width, valueHeight + 22),
+			BackColor = Color.Transparent,
+		};
+
+		var captionLabel = new Label
+		{
+			Text = caption,
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 8.8f),
+			AutoSize = true,
+			Location = new Point(0, 0),
+		};
+
+		var valueLabel = new Label
+		{
+			Text = value,
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", valueFontSize, FontStyle.Bold),
+			AutoEllipsis = !multiline,
+			Size = new Size(width, valueHeight),
+			Location = new Point(0, 22),
+			TextAlign = ContentAlignment.TopLeft,
+		};
+
+		wrapper.Controls.AddRange(new Control[] { captionLabel, valueLabel });
+		return wrapper;
+	}
+
+	private Panel BuildAddressRow(string caption, string address, string? copyValue, bool withStatusBadge)
 	{
 		var row = new Panel
 		{
-			Width     = RightW - 24,
-			Height    = 40,
-			Location  = new Point(x, y),
-			BackColor = CCard,
+			Size = new Size(RightW - 40, 58),
+			BackColor = Color.FromArgb(250, 251, 253),
 		};
+		ApplyRoundedRegion(row, 18);
+		row.Paint += (_, e) => DrawRoundedBorder(e, row.ClientRectangle, 18, CBorder);
 
-		var cap = new Label
+		var captionLabel = new Label
 		{
-			Text      = caption,
+			Text = caption,
 			ForeColor = CTextMuted,
-			Font      = new Font("Segoe UI", 8f),
-			AutoSize  = true,
-			Location  = new Point(0, 2),
+			Font = new Font("Segoe UI", 8.5f),
+			AutoSize = true,
+			Location = new Point(14, 10),
 		};
 
-		var addr = new Label
+		var copyButton = CreateIconButton();
+		copyButton.Location = new Point(row.Width - copyButton.Width - 12, 13);
+		copyButton.Enabled = !string.IsNullOrWhiteSpace(copyValue);
+		copyButton.Click += (_, _) =>
 		{
-			Text      = address,
+			if (!string.IsNullOrWhiteSpace(copyValue))
+			{
+				CopyToClipboard(copyValue);
+			}
+		};
+
+		var badgeWidth = withStatusBadge ? 72 : 0;
+		var statusBadge = CreateStatusBadge();
+		statusBadge.Location = new Point(copyButton.Left - badgeWidth - 10, 14);
+		statusBadge.Visible = withStatusBadge;
+
+		if (withStatusBadge)
+		{
+			_ipv6StatusLabel = statusBadge;
+		}
+
+		var valueLabel = new Label
+		{
+			Text = address,
 			ForeColor = CTextPrimary,
-			Font      = new Font("Segoe UI", 9f),
-			AutoSize  = true,
-			Location  = new Point(0, 20),
+			Font = new Font("Segoe UI", 10.2f, FontStyle.Bold),
+			AutoEllipsis = true,
+			Size = new Size(statusBadge.Left - 30, 24),
+			Location = new Point(14, 30),
 		};
 
-		// 右侧徽章（用于 IPv6 就绪状态；非 IPv6 行留空 Label 占位）
-		var badge = new Label
+		if (!withStatusBadge)
 		{
-			Text      = "",
+			valueLabel.Width = copyButton.Left - 28;
+		}
+
+		row.Controls.AddRange(new Control[] { captionLabel, valueLabel, statusBadge, copyButton });
+		return row;
+	}
+
+	private static Label CreateStatusBadge()
+	{
+		var label = new Label
+		{
+			Size = new Size(72, 28),
+			TextAlign = ContentAlignment.MiddleCenter,
+			Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
 			ForeColor = CTextMuted,
-			Font      = new Font("Segoe UI", 8f),
-			AutoSize  = true,
-			Location  = new Point(RightW - 100, 2),
+			BackColor = Color.FromArgb(243, 245, 248),
+		};
+		ApplyRoundedRegion(label, 14);
+		return label;
+	}
+
+	private Control BuildEmptyDeviceState()
+	{
+		var panel = new Panel
+		{
+			Size = new Size(RightW - 40, 108),
+			BackColor = CAccentSoft,
+			Margin = new Padding(0),
+		};
+		ApplyRoundedRegion(panel, 18);
+		panel.Paint += (_, e) => DrawRoundedBorder(e, panel.ClientRectangle, 18, Color.FromArgb(220, 230, 252));
+
+		var text = new Label
+		{
+			Text = "暂无连接记录\n最近 5 分钟内没有来自客户端的新请求",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9f),
+			Dock = DockStyle.Fill,
+			TextAlign = ContentAlignment.MiddleCenter,
+		};
+		panel.Controls.Add(text);
+		return panel;
+	}
+
+	private Control BuildDeviceItem(string ipAddress, string agoText)
+	{
+		var panel = new Panel
+		{
+			Size = new Size(RightW - 40, 60),
+			BackColor = Color.FromArgb(250, 251, 253),
+			Margin = new Padding(0, 0, 0, 10),
+		};
+		ApplyRoundedRegion(panel, 18);
+		panel.Paint += (_, e) => DrawRoundedBorder(e, panel.ClientRectangle, 18, CBorder);
+
+		var title = new Label
+		{
+			Text = ipAddress,
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+			AutoSize = true,
+			Location = new Point(14, 11),
 		};
 
-		row.Controls.AddRange(new Control[] { cap, addr, badge });
-		return row;
+		var subtitle = new Label
+		{
+			Text = $"最近活动: {agoText}",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 8.5f),
+			AutoSize = true,
+			Location = new Point(14, 33),
+		};
+
+		var copyButton = CreateIconButton();
+		copyButton.Location = new Point(panel.Width - 44, 14);
+		copyButton.Click += (_, _) => CopyToClipboard(ipAddress);
+
+		panel.Controls.AddRange(new Control[] { title, subtitle, copyButton });
+		return panel;
+	}
+
+	private static Button CreateOutlineButton(string text, int width, int height)
+	{
+		var button = new Button
+		{
+			Text = text,
+			Size = new Size(width, height),
+			FlatStyle = FlatStyle.Flat,
+			BackColor = Color.White,
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 8.8f),
+			UseVisualStyleBackColor = false,
+		};
+		button.FlatAppearance.BorderSize = 0;
+		ApplyRoundedRegion(button, 14);
+		button.Paint += (_, e) => DrawRoundedBorder(e, button.ClientRectangle, 14, CBorder);
+		return button;
+	}
+
+	private static Button CreateFilledButton(string text, int width, int height)
+	{
+		var button = new Button
+		{
+			Text = text,
+			Size = new Size(width, height),
+			FlatStyle = FlatStyle.Flat,
+			BackColor = CAccent,
+			ForeColor = Color.White,
+			Font = new Font("Segoe UI", 8.8f),
+			UseVisualStyleBackColor = false,
+		};
+		button.FlatAppearance.BorderSize = 0;
+		ApplyRoundedRegion(button, 14);
+		return button;
+	}
+
+	private static Button CreateIconButton()
+	{
+		var button = new Button
+		{
+			Text = "⧉",
+			Size = new Size(32, 32),
+			FlatStyle = FlatStyle.Flat,
+			BackColor = Color.White,
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI Symbol", 10.5f),
+			UseVisualStyleBackColor = false,
+			Cursor = Cursors.Hand,
+		};
+		button.FlatAppearance.BorderSize = 0;
+		ApplyRoundedRegion(button, 10);
+		button.Paint += (_, e) => DrawRoundedBorder(e, button.ClientRectangle, 10, CBorder);
+		return button;
+	}
+
+	private static void ApplyRoundedRegion(Control control, int radius)
+	{
+		void UpdateRegion()
+		{
+			if (control.Width <= 0 || control.Height <= 0)
+			{
+				return;
+			}
+
+			var previousRegion = control.Region;
+			using var path = CreateRoundedPath(new Rectangle(0, 0, control.Width - 1, control.Height - 1), radius);
+			control.Region = new Region(path);
+			previousRegion?.Dispose();
+		}
+
+		control.SizeChanged += (_, _) => UpdateRegion();
+		UpdateRegion();
+	}
+
+	private static void DrawRoundedBorder(PaintEventArgs e, Rectangle bounds, int radius, Color borderColor)
+	{
+		e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+		using var path = CreateRoundedPath(new Rectangle(bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1), radius);
+		using var pen = new Pen(borderColor);
+		e.Graphics.DrawPath(pen, path);
+	}
+
+	private static GraphicsPath CreateRoundedPath(Rectangle bounds, int radius)
+	{
+		var diameter = radius * 2;
+		var path = new GraphicsPath();
+
+		if (radius <= 0)
+		{
+			path.AddRectangle(bounds);
+			path.CloseFigure();
+			return path;
+		}
+
+		path.AddArc(bounds.X, bounds.Y, diameter, diameter, 180, 90);
+		path.AddArc(bounds.Right - diameter, bounds.Y, diameter, diameter, 270, 90);
+		path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+		path.AddArc(bounds.X, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+		path.CloseFigure();
+		return path;
+	}
+
+	private static void CopyToClipboard(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text)) return;
+		for (int i = 0; i < 3; i++)
+		{
+			try
+			{
+				Clipboard.SetText(text);
+				return;
+			}
+			catch (System.Runtime.InteropServices.ExternalException)
+			{
+				System.Threading.Thread.Sleep(50);
+			}
+		}
+	}
+
+	private static void OpenUrl(string url)
+	{
+		try
+		{
+			Process.Start(new ProcessStartInfo
+			{
+				FileName = url,
+				UseShellExecute = true,
+			});
+		}
+		catch
+		{
+		}
 	}
 
 	private static string FormatBytes(double bytes)
@@ -483,18 +806,27 @@ public sealed class HostStatusForm : Form
 		return bytes switch
 		{
 			>= 1_099_511_627_776 => $"{bytes / 1_099_511_627_776:F1} TB",
-			>= 1_073_741_824     => $"{bytes / 1_073_741_824:F1} GB",
-			>= 1_048_576         => $"{bytes / 1_048_576:F0} MB",
-			_                    => $"{bytes / 1024:F0} KB",
+			>= 1_073_741_824 => $"{bytes / 1_073_741_824:F1} GB",
+			>= 1_048_576 => $"{bytes / 1_048_576:F0} MB",
+			_ => $"{bytes / 1024:F0} KB",
 		};
 	}
 
-	// ── 生命周期 ──────────────────────────────────────────────────────────────
 	private void CloseFromHostThread()
 	{
-		if (!IsHandleCreated || IsDisposed) return;
-		if (InvokeRequired) BeginInvoke(new Action(Close));
-		else Close();
+		if (!IsHandleCreated || IsDisposed)
+		{
+			return;
+		}
+
+		if (InvokeRequired)
+		{
+			BeginInvoke(new Action(Close));
+		}
+		else
+		{
+			Close();
+		}
 	}
 
 	protected override void OnFormClosing(FormClosingEventArgs e)
@@ -505,7 +837,11 @@ public sealed class HostStatusForm : Form
 
 	protected override void Dispose(bool disposing)
 	{
-		if (disposing) _refreshTimer.Dispose();
+		if (disposing)
+		{
+			_refreshTimer.Dispose();
+		}
+
 		base.Dispose(disposing);
 	}
 }
