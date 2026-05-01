@@ -7,6 +7,7 @@ namespace LoalNas.Host.Services;
 public sealed class FileBrowserApiProxy(
     IHttpClientFactory httpClientFactory,
     FileBrowserProcessManager processManager,
+    ConnectedDeviceTracker deviceTracker,
     ILogger<FileBrowserApiProxy> logger)
 {
     public const string HttpClientName = "filebrowser-proxy";
@@ -25,6 +26,7 @@ public sealed class FileBrowserApiProxy(
 
     public async Task ProxyApiAsync(HttpContext context, string? path)
     {
+        deviceTracker.RecordActivity(context.Connection.RemoteIpAddress?.ToString());
         try
         {
             await processManager.EnsureRunningAsync(context.RequestAborted);

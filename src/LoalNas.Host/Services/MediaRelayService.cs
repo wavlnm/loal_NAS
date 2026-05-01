@@ -7,6 +7,7 @@ namespace LoalNas.Host.Services;
 public sealed class MediaRelayService(
 	IHttpClientFactory httpClientFactory,
 	FileBrowserProcessManager processManager,
+	ConnectedDeviceTracker deviceTracker,
 	ILogger<MediaRelayService> logger)
 {
 	public const string HttpClientName = "media-relay";
@@ -47,6 +48,7 @@ public sealed class MediaRelayService(
 
 	public async Task ProxyMediaAsync(HttpContext context, string ticketId)
 	{
+		deviceTracker.RecordActivity(context.Connection.RemoteIpAddress?.ToString());
 		CleanupExpiredTickets();
 
 		if (!tickets.TryGetValue(ticketId, out var ticket))

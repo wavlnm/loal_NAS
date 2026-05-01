@@ -17,8 +17,8 @@ internal static class Program
 		var firewallEnsurer = app.Services.GetRequiredService<WindowsFirewallRuleEnsurer>();
 		var fileBrowserManager = app.Services.GetRequiredService<FileBrowserProcessManager>();
 		var appLifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
-
-		var started = false;
+		var deviceTracker = app.Services.GetRequiredService<ConnectedDeviceTracker>();
+		bool started = false;
 
 		try
 		{
@@ -30,7 +30,7 @@ internal static class Program
 			_ = firewallEnsurer.EnsureRulesForUrlsAsync(boundUrls);
 
 			ApplicationConfiguration.Initialize();
-			using var form = new HostStatusForm(fileBrowserManager, appLifetime, boundUrls);
+			using var form = new HostStatusForm(fileBrowserManager, appLifetime, deviceTracker, boundUrls);
 			Application.Run(form);
 		}
 		finally
@@ -93,6 +93,7 @@ internal static class Program
 		builder.Services.AddSingleton<FileBrowserApiProxy>();
 		builder.Services.AddSingleton<MediaRelayService>();
 		builder.Services.AddSingleton<WindowsFirewallRuleEnsurer>();
+		builder.Services.AddSingleton<ConnectedDeviceTracker>();
 
 		var app = builder.Build();
 		MapEndpoints(app);
