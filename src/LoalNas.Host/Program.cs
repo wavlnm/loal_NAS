@@ -75,9 +75,19 @@ internal static class Program
 		{
 			AllowAutoRedirect = false,
 			UseCookies = false,
-			AutomaticDecompression = DecompressionMethods.All
+			AutomaticDecompression = DecompressionMethods.None
 		});
-
+		// 媒体中转专用 HttpClient：禁用自动解压，保证 Content-Length/Content-Encoding
+		// 原样透传给浏览器，浏览器才能正确 Range seek 流式播放。
+		builder.Services.AddHttpClient(MediaRelayService.HttpClientName, client =>
+		{
+			client.Timeout = Timeout.InfiniteTimeSpan;
+		}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+		{
+			AllowAutoRedirect = false,
+			UseCookies = false,
+			AutomaticDecompression = DecompressionMethods.None
+		});
  		builder.Services.AddSingleton<FileBrowserProcessManager>();
 		builder.Services.AddHostedService(services => services.GetRequiredService<FileBrowserProcessManager>());
 		builder.Services.AddSingleton<FileBrowserApiProxy>();

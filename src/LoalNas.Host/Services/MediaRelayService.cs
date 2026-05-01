@@ -9,6 +9,8 @@ public sealed class MediaRelayService(
 	FileBrowserProcessManager processManager,
 	ILogger<MediaRelayService> logger)
 {
+	public const string HttpClientName = "media-relay";
+
 	private static readonly TimeSpan TicketLifetime = TimeSpan.FromMinutes(30);
 
 	private static readonly HashSet<string> HopByHopHeaders = new(StringComparer.OrdinalIgnoreCase)
@@ -20,7 +22,10 @@ public sealed class MediaRelayService(
 		"TE",
 		"Trailer",
 		"Transfer-Encoding",
-		"Upgrade"
+		"Upgrade",
+		// 不转发 Accept-Encoding：让 FileBrowser 返回原始未压缩数据，
+		// 保证 Content-Length 与 body 一致，浏览器才能正确 seek/Range。
+		"Accept-Encoding"
 	};
 
 	private readonly ConcurrentDictionary<string, MediaRelayTicket> tickets = new();
@@ -70,7 +75,7 @@ public sealed class MediaRelayService(
 			await processManager.EnsureRunningAsync(context.RequestAborted);
 
 			using var requestMessage = CreateProxyRequest(context, ticket);
-			using var responseMessage = await httpClientFactory.CreateClient(FileBrowserApiProxy.HttpClientName)
+			using var responseMessage = await httpClientFactory.CreateClient(HttpClientName)
 				.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
 
 			await CopyProxyResponseAsync(context, responseMessage);

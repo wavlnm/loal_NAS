@@ -48,9 +48,9 @@
 ## 防火墙脚本
 
 - 脚本位置：`scripts/Enable-LoalNasFirewallRule.ps1`
-- 默认行为：放行 Windows 入站 TCP 5034 端口，作用于 `Private` 配置文件。
+- 默认行为：放行 Windows 入站 TCP 5034 端口，作用于 `Any` 配置文件。
 - 管理员 PowerShell 执行：`powershell -ExecutionPolicy Bypass -File .\scripts\Enable-LoalNasFirewallRule.ps1`
-- 如果当前网络被 Windows 标记为 Public，可执行：`powershell -ExecutionPolicy Bypass -File .\scripts\Enable-LoalNasFirewallRule.ps1 -Profiles Public`
+- 如果你只想放行 `Public`，可执行：`powershell -ExecutionPolicy Bypass -File .\scripts\Enable-LoalNasFirewallRule.ps1 -Profiles Public`
 - 如果你明确需要所有网络配置文件都放行，可执行：`powershell -ExecutionPolicy Bypass -File .\scripts\Enable-LoalNasFirewallRule.ps1 -Profiles Any`
 
 示例：

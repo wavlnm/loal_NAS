@@ -2,7 +2,7 @@ param(
     [int]$Port = 5034,
     [string]$RuleName = "loal_NAS Host TCP 5034",
     [ValidateSet("Any", "Domain", "Private", "Public")]
-    [string[]]$Profiles = @("Private")
+    [string[]]$Profiles = @("Any")
 )
 
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -31,4 +31,4 @@ $rule = New-NetFirewallRule @ruleParameters
 Write-Host "Created firewall rule: $($rule.DisplayName)"
 Write-Host "Opened port: TCP $Port"
 Write-Host "Profiles: $($Profiles -join ', ')"
-Write-Host "If Windows marks the active network as Public, rerun with -Profiles Public or -Profiles Any."
+Write-Host "Override profiles with -Profiles Domain, Private, Public, or Any if needed."
