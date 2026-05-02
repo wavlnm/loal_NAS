@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Windows.Forms;
 using LoalNas.Host.Services;
 using Microsoft.Extensions.Hosting;
+using QRCoder;
 
 namespace LoalNas.Host.Forms;
 
@@ -46,6 +47,7 @@ public sealed class HostStatusForm : Form
 	private Label _storagePercentLabel = null!;
 	private Panel _storageFillPanel = null!;
 	private Panel _storageBarBg = null!;
+	private Image? _deviceBindingQrImage;
 	private FlowLayoutPanel _devicesListPanel = null!;
 	private readonly Dictionary<string, (Panel Panel, Label AgoLabel)> _deviceItemViews = new();
 	private Panel? _emptyDeviceStatePanel;
@@ -185,19 +187,36 @@ public sealed class HostStatusForm : Form
 			Location = new Point(24, 92),
 			Size = new Size(168, 168),
 			BackColor = Color.White,
+			Padding = new Padding(12),
 		};
 		ApplyRoundedRegion(qrShell, 22);
 		qrShell.Paint += (_, e) => DrawRoundedBorder(e, qrShell.ClientRectangle, 22, CBorder);
 
-		var qrPlaceholder = new Label
+		try
 		{
-			Text = "二维码\n待接入",
-			ForeColor = CTextMuted,
-			Dock = DockStyle.Fill,
-			TextAlign = ContentAlignment.MiddleCenter,
-			Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-		};
-		qrShell.Controls.Add(qrPlaceholder);
+			_deviceBindingQrImage = CreateDeviceBindingQrImage();
+			var qrPictureBox = new PictureBox
+			{
+				Dock = DockStyle.Fill,
+				BackColor = Color.White,
+				Image = _deviceBindingQrImage,
+				SizeMode = PictureBoxSizeMode.Zoom,
+				TabStop = false,
+			};
+			qrShell.Controls.Add(qrPictureBox);
+		}
+		catch
+		{
+			var qrFallback = new Label
+			{
+				Text = "二维码生成失败\n请复制设备 ID 手动绑定",
+				ForeColor = CTextMuted,
+				Dock = DockStyle.Fill,
+				TextAlign = ContentAlignment.MiddleCenter,
+				Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+			};
+			qrShell.Controls.Add(qrFallback);
+		}
 
 		deviceCard.Controls.Add(qrShell);
 		deviceCard.Controls.Add(BuildInfoPair("设备名称", _deviceIdentity.DeviceName, 222, 102, 304, 34, 13f, false));
@@ -291,7 +310,7 @@ public sealed class HostStatusForm : Form
 
 		var networkCard = BuildCard(RightW, 350);
 		networkCard.Location = new Point(0, 0);
-		networkCard.Controls.Add(MakeSectionTitle("设备地址", "用于局域网和公网访问的地址", 20, 20));
+		networkCard.Controls.Add(MakeSectionTitle("设备地址", "设备地址可能发生改变，建议登录客户端以实时同步最新地址。", 20, 20));
 
 		int top = 92;
 		var ipv6Row = BuildAddressRow(
@@ -326,16 +345,6 @@ public sealed class HostStatusForm : Form
 			top += 70;
 		}
 
-		var networkHint = new Label
-		{
-			Text = "设备地址可能发生改变，建议登录客户端以实时同步最新地址。",
-			ForeColor = CTextMuted,
-			Font = new Font("Segoe UI", 8.5f),
-			AutoSize = false,
-			Size = new Size(RightW - 40, 20),
-			Location = new Point(20, 298),
-		};
-
 		_cloudSyncStatusLabel = new Label
 		{
 			Text = "",
@@ -343,9 +352,9 @@ public sealed class HostStatusForm : Form
 			Font = new Font("Segoe UI", 8.5f),
 			AutoSize = false,
 			Size = new Size(RightW - 40, 20),
-			Location = new Point(20, 322),
+			Location = new Point(20, 306),
 		};
-		networkCard.Controls.AddRange(new Control[] { networkHint, _cloudSyncStatusLabel });
+		networkCard.Controls.Add(_cloudSyncStatusLabel);
 
 		var devicesCard = BuildCard(RightW, 252);
 		devicesCard.Location = new Point(0, 374);
@@ -920,6 +929,23 @@ public sealed class HostStatusForm : Form
 			?.SetValue(control, true);
 	}
 
+	private string CreateDeviceBindingPayload()
+	{
+		return System.Text.Json.JsonSerializer.Serialize(new
+		{
+			deviceId = _deviceIdentity.DeviceId,
+			deviceName = _deviceIdentity.DeviceName,
+		});
+	}
+
+	private Image CreateDeviceBindingQrImage()
+	{
+		using var generator = new QRCodeGenerator();
+		using var qrData = generator.CreateQrCode(CreateDeviceBindingPayload(), QRCodeGenerator.ECCLevel.Q);
+		using var qrCode = new QRCode(qrData);
+		return qrCode.GetGraphic(8, CTextPrimary, Color.White, drawQuietZones: true);
+	}
+
 	private static Button CreateOutlineButton(string text, int width, int height)
 	{
 		var button = new Button
@@ -1092,6 +1118,7 @@ public sealed class HostStatusForm : Form
 		if (disposing)
 		{
 			_refreshTimer.Dispose();
+			_deviceBindingQrImage?.Dispose();
 		}
 
 		base.Dispose(disposing);
