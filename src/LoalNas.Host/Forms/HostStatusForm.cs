@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Net;
+using System.Reflection;
 using System.Windows.Forms;
 using LoalNas.Host.Services;
 using Microsoft.Extensions.Hosting;
@@ -46,6 +47,10 @@ public sealed class HostStatusForm : Form
 	private Panel _storageFillPanel = null!;
 	private Panel _storageBarBg = null!;
 	private FlowLayoutPanel _devicesListPanel = null!;
+	private readonly Dictionary<string, (Panel Panel, Label AgoLabel)> _deviceItemViews = new();
+	private Panel? _emptyDeviceStatePanel;
+	private Label _cloudSyncStatusLabel = null!;
+	private int _syncTickCount;
 
 	private enum ConnectivityState { Testing, Ready, NotReady, NoAddress }
 
@@ -77,7 +82,7 @@ public sealed class HostStatusForm : Form
 
 	private async void OnShown(object? sender, EventArgs e)
 	{
-		await RefreshDynamicAsync();
+		await RefreshDynamicAsync(forceCloudSync: true);
 		_refreshTimer.Start();
 	}
 
@@ -328,9 +333,19 @@ public sealed class HostStatusForm : Form
 			Font = new Font("Segoe UI", 8.5f),
 			AutoSize = false,
 			Size = new Size(RightW - 40, 20),
-			Location = new Point(20, 300),
+			Location = new Point(20, 298),
 		};
-		networkCard.Controls.Add(networkHint);
+
+		_cloudSyncStatusLabel = new Label
+		{
+			Text = "",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 8.5f),
+			AutoSize = false,
+			Size = new Size(RightW - 40, 20),
+			Location = new Point(20, 322),
+		};
+		networkCard.Controls.AddRange(new Control[] { networkHint, _cloudSyncStatusLabel });
 
 		var devicesCard = BuildCard(RightW, 252);
 		devicesCard.Location = new Point(0, 374);
@@ -347,13 +362,14 @@ public sealed class HostStatusForm : Form
 			Margin = new Padding(0),
 			Padding = new Padding(0),
 		};
+		EnableDoubleBuffered(_devicesListPanel);
 		devicesCard.Controls.Add(_devicesListPanel);
 
 		panel.Controls.AddRange(new Control[] { networkCard, devicesCard });
 		return panel;
 	}
 
-	private async Task RefreshDynamicAsync()
+	private async Task RefreshDynamicAsync(bool forceCloudSync = false)
 	{
 		if (Interlocked.Exchange(ref _refreshInFlight, 1) == 1)
 		{
@@ -365,6 +381,13 @@ public sealed class HostStatusForm : Form
 			RefreshStorageUsage();
 			RefreshDevicesList();
 			await RefreshServiceAndNetworkAsync();
+
+			_syncTickCount++;
+			if (forceCloudSync || _syncTickCount >= 8)
+			{
+				_syncTickCount = 0;
+				await SyncDeviceToCloudAsync();
+			}
 		}
 		catch
 		{
@@ -424,6 +447,59 @@ public sealed class HostStatusForm : Form
 		await TestIpv6ConnectivityAsync();
 	}
 
+	private async Task SyncDeviceToCloudAsync()
+	{
+		var ipv6 = _stableIpv6?.ToString();
+		if (string.IsNullOrEmpty(ipv6))
+		{
+			_cloudSyncStatusLabel.Text = "暂无公网 IPv6 地址，跳过同步";
+			_cloudSyncStatusLabel.ForeColor = CTextMuted;
+			return;
+		}
+
+		try
+		{
+			var payload = System.Text.Json.JsonSerializer.Serialize(new
+			{
+				deviceId = _deviceIdentity.DeviceId,
+				deviceName = _deviceIdentity.DeviceName,
+				ipv6Address = ipv6,
+			});
+			using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+			using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+			var response = await client.PutAsync("https://reportzs.me/nas-api/devices/by-device-id", content);
+			var body = await response.Content.ReadAsStringAsync();
+
+			bool success = false;
+			string? error = null;
+			try
+			{
+				using var doc = System.Text.Json.JsonDocument.Parse(body);
+				if (doc.RootElement.TryGetProperty("success", out var s))
+					success = s.GetBoolean();
+				if (!success && doc.RootElement.TryGetProperty("error", out var err))
+					error = err.GetString();
+			}
+			catch { }
+
+			if (success)
+			{
+				_cloudSyncStatusLabel.Text = $"地址已同步至云端 · {DateTime.Now:HH:mm:ss}";
+				_cloudSyncStatusLabel.ForeColor = CSuccess;
+			}
+			else
+			{
+				_cloudSyncStatusLabel.Text = $"地址同步失败: {error ?? "未知错误"}";
+				_cloudSyncStatusLabel.ForeColor = CDanger;
+			}
+		}
+		catch (Exception ex)
+		{
+			_cloudSyncStatusLabel.Text = $"地址同步失败: {ex.Message}";
+			_cloudSyncStatusLabel.ForeColor = CDanger;
+		}
+	}
+
 	private void RefreshNetworkAddressSnapshot()
 	{
 		_stableIpv6 = NetworkInfoService.GetStablePublicIpv6();
@@ -445,23 +521,84 @@ public sealed class HostStatusForm : Form
 	private void RefreshDevicesList()
 	{
 		_devicesListPanel.SuspendLayout();
-		_devicesListPanel.Controls.Clear();
 
-		var devices = _deviceTracker.GetActiveDevices();
+		var devices = _deviceTracker.GetActiveDevices().Take(5).ToList();
 		if (devices.Count == 0)
 		{
-			_devicesListPanel.Controls.Add(BuildEmptyDeviceState());
+			foreach (var view in _deviceItemViews.Values)
+			{
+				_devicesListPanel.Controls.Remove(view.Panel);
+				view.Panel.Dispose();
+			}
+			_deviceItemViews.Clear();
+
+			_emptyDeviceStatePanel ??= (Panel)BuildEmptyDeviceState();
+			if (_devicesListPanel.Controls.Count != 1 || _devicesListPanel.Controls[0] != _emptyDeviceStatePanel)
+			{
+				_devicesListPanel.Controls.Clear();
+				_devicesListPanel.Controls.Add(_emptyDeviceStatePanel);
+			}
+
 			_devicesListPanel.ResumeLayout();
 			return;
 		}
 
-		foreach (var device in devices.Take(5))
+		if (_emptyDeviceStatePanel is not null)
+		{
+			_devicesListPanel.Controls.Remove(_emptyDeviceStatePanel);
+		}
+
+		var activeIps = new HashSet<string>(devices.Select(d => d.IpAddress));
+		var staleIps = _deviceItemViews.Keys.Where(ip => !activeIps.Contains(ip)).ToList();
+		foreach (var staleIp in staleIps)
+		{
+			var view = _deviceItemViews[staleIp];
+			_devicesListPanel.Controls.Remove(view.Panel);
+			view.Panel.Dispose();
+			_deviceItemViews.Remove(staleIp);
+		}
+
+		var desiredPanels = new List<Panel>(devices.Count);
+		foreach (var device in devices)
 		{
 			var elapsed = DateTimeOffset.UtcNow - device.LastSeen;
 			var agoText = elapsed.TotalSeconds < 60
 				? $"{Math.Max(1, (int)elapsed.TotalSeconds)} 秒前"
 				: $"{Math.Max(1, (int)elapsed.TotalMinutes)} 分钟前";
-			_devicesListPanel.Controls.Add(BuildDeviceItem(device.IpAddress, agoText));
+
+			if (!_deviceItemViews.TryGetValue(device.IpAddress, out var view))
+			{
+				view = BuildDeviceItem(device.IpAddress, agoText);
+				_deviceItemViews[device.IpAddress] = view;
+			}
+			else
+			{
+				view.AgoLabel.Text = $"最近活动: {agoText}";
+			}
+
+			desiredPanels.Add(view.Panel);
+		}
+
+		var orderChanged = _devicesListPanel.Controls.Count != desiredPanels.Count;
+		if (!orderChanged)
+		{
+			for (int i = 0; i < desiredPanels.Count; i++)
+			{
+				if (_devicesListPanel.Controls[i] != desiredPanels[i])
+				{
+					orderChanged = true;
+					break;
+				}
+			}
+		}
+
+		if (orderChanged)
+		{
+			_devicesListPanel.Controls.Clear();
+			foreach (var panel in desiredPanels)
+			{
+				_devicesListPanel.Controls.Add(panel);
+			}
 		}
 
 		_devicesListPanel.ResumeLayout();
@@ -739,7 +876,7 @@ public sealed class HostStatusForm : Form
 		return panel;
 	}
 
-	private Control BuildDeviceItem(string ipAddress, string agoText)
+	private (Panel Panel, Label AgoLabel) BuildDeviceItem(string ipAddress, string agoText)
 	{
 		var panel = new Panel
 		{
@@ -773,7 +910,14 @@ public sealed class HostStatusForm : Form
 		copyButton.Click += (_, _) => CopyToClipboard(ipAddress);
 
 		panel.Controls.AddRange(new Control[] { title, subtitle, copyButton });
-		return panel;
+		return (panel, subtitle);
+	}
+
+	private static void EnableDoubleBuffered(Control control)
+	{
+		typeof(Control)
+			.GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)
+			?.SetValue(control, true);
 	}
 
 	private static Button CreateOutlineButton(string text, int width, int height)
