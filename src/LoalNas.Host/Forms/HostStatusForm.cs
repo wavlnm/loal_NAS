@@ -32,10 +32,15 @@ public sealed class HostStatusForm : Form
 	private readonly DeviceIdentityService _deviceIdentity;
 	private readonly string[] _boundUrls;
 	private readonly System.Windows.Forms.Timer _refreshTimer;
-	private readonly IPAddress? _stableIpv6;
-	private readonly IReadOnlyList<IPAddress> _lanIpv4;
+	private IPAddress? _stableIpv6;
+	private IReadOnlyList<IPAddress> _lanIpv4;
+	private int _refreshInFlight;
 
 	private Label _ipv6StatusLabel = null!;
+	private Label _ipv6AddressLabel = null!;
+	private Button _ipv6CopyButton = null!;
+	private readonly List<Label> _lanIpv4AddressLabels = new();
+	private readonly List<Button> _lanIpv4CopyButtons = new();
 	private Label _storageUsageLabel = null!;
 	private Label _storagePercentLabel = null!;
 	private Panel _storageFillPanel = null!;
@@ -63,7 +68,7 @@ public sealed class HostStatusForm : Form
 		InitializeComponent();
 
 		_refreshTimer = new System.Windows.Forms.Timer { Interval = 4000 };
-		_refreshTimer.Tick += (_, _) => RefreshDynamic();
+		_refreshTimer.Tick += async (_, _) => await RefreshDynamicAsync();
 		_applicationLifetime.ApplicationStopping.Register(CloseFromHostThread);
 
 		Shown += OnShown;
@@ -72,9 +77,8 @@ public sealed class HostStatusForm : Form
 
 	private async void OnShown(object? sender, EventArgs e)
 	{
-		RefreshDynamic();
+		await RefreshDynamicAsync();
 		_refreshTimer.Start();
-		await TestIpv6ConnectivityAsync();
 	}
 
 	private void InitializeComponent()
@@ -285,26 +289,36 @@ public sealed class HostStatusForm : Form
 		networkCard.Controls.Add(MakeSectionTitle("设备地址", "用于局域网和公网访问的地址", 20, 20));
 
 		int top = 92;
-		var ipv6Row = BuildAddressRow("公网 IPv6 地址", _stableIpv6?.ToString() ?? "未检测到稳定公网 IPv6 地址", _stableIpv6?.ToString(), true);
+		var ipv6Row = BuildAddressRow(
+			"公网 IPv6 地址",
+			_stableIpv6?.ToString() ?? "未检测到稳定公网 IPv6 地址",
+			_stableIpv6?.ToString(),
+			true,
+			(valueLabel, copyButton) =>
+			{
+				_ipv6AddressLabel = valueLabel;
+				_ipv6CopyButton = copyButton;
+			});
 		ipv6Row.Location = new Point(20, top);
 		networkCard.Controls.Add(ipv6Row);
 		top += 70;
 
-		if (_lanIpv4.Count == 0)
+		for (int index = 0; index < 2; index++)
 		{
-			var noIpv4Row = BuildAddressRow("局域网地址", "未检测到局域网 IPv4 地址", null, false);
-			noIpv4Row.Location = new Point(20, top);
-			networkCard.Controls.Add(noIpv4Row);
-		}
-		else
-		{
-			foreach (var ip in _lanIpv4.Take(2))
-			{
-				var row = BuildAddressRow("局域网地址", ip.ToString(), ip.ToString(), false);
-				row.Location = new Point(20, top);
-				networkCard.Controls.Add(row);
-				top += 70;
-			}
+			var address = _lanIpv4.ElementAtOrDefault(index)?.ToString();
+			var row = BuildAddressRow(
+				"局域网地址",
+				address ?? (index == 0 ? "未检测到局域网 IPv4 地址" : "暂无第二个局域网 IPv4 地址"),
+				address,
+				false,
+				(valueLabel, copyButton) =>
+				{
+					_lanIpv4AddressLabels.Add(valueLabel);
+					_lanIpv4CopyButtons.Add(copyButton);
+				});
+			row.Location = new Point(20, top);
+			networkCard.Controls.Add(row);
+			top += 70;
 		}
 
 		var networkHint = new Label
@@ -339,7 +353,30 @@ public sealed class HostStatusForm : Form
 		return panel;
 	}
 
-	private void RefreshDynamic()
+	private async Task RefreshDynamicAsync()
+	{
+		if (Interlocked.Exchange(ref _refreshInFlight, 1) == 1)
+		{
+			return;
+		}
+
+		try
+		{
+			RefreshStorageUsage();
+			RefreshDevicesList();
+			await RefreshServiceAndNetworkAsync();
+		}
+		catch
+		{
+			SetIpv6Badge(ConnectivityState.NotReady);
+		}
+		finally
+		{
+			Interlocked.Exchange(ref _refreshInFlight, 0);
+		}
+	}
+
+	private void RefreshStorageUsage()
 	{
 		try
 		{
@@ -366,8 +403,43 @@ public sealed class HostStatusForm : Form
 			_storagePercentLabel.Text = "--";
 			_storageFillPanel.Width = 0;
 		}
+	}
 
-		RefreshDevicesList();
+	private async Task RefreshServiceAndNetworkAsync()
+	{
+		if (!_fileBrowserManager.IsRunning)
+		{
+			try
+			{
+				await _fileBrowserManager.EnsureRunningAsync(CancellationToken.None);
+			}
+			catch
+			{
+				SetIpv6Badge(ConnectivityState.NotReady);
+				return;
+			}
+		}
+
+		RefreshNetworkAddressSnapshot();
+		await TestIpv6ConnectivityAsync();
+	}
+
+	private void RefreshNetworkAddressSnapshot()
+	{
+		_stableIpv6 = NetworkInfoService.GetStablePublicIpv6();
+		_lanIpv4 = NetworkInfoService.GetLanIpv4Addresses();
+
+		_ipv6AddressLabel.Text = _stableIpv6?.ToString() ?? "未检测到稳定公网 IPv6 地址";
+		_ipv6CopyButton.Enabled = _stableIpv6 is not null;
+		_ipv6CopyButton.Tag = _stableIpv6?.ToString();
+
+		for (int index = 0; index < _lanIpv4AddressLabels.Count; index++)
+		{
+			var address = _lanIpv4.ElementAtOrDefault(index)?.ToString();
+			_lanIpv4AddressLabels[index].Text = address ?? (index == 0 ? "未检测到局域网 IPv4 地址" : "暂无第二个局域网 IPv4 地址");
+			_lanIpv4CopyButtons[index].Enabled = !string.IsNullOrWhiteSpace(address);
+			_lanIpv4CopyButtons[index].Tag = address;
+		}
 	}
 
 	private void RefreshDevicesList()
@@ -397,6 +469,12 @@ public sealed class HostStatusForm : Form
 
 	private async Task TestIpv6ConnectivityAsync()
 	{
+		if (!await IsHostReachableLocallyAsync())
+		{
+			SetIpv6Badge(ConnectivityState.NotReady);
+			return;
+		}
+
 		if (_stableIpv6 is null)
 		{
 			SetIpv6Badge(ConnectivityState.NoAddress);
@@ -408,7 +486,7 @@ public sealed class HostStatusForm : Form
 		{
 			var port = GetBoundPort();
 			var testUrl = $"http://[{_stableIpv6}]:{port}/api/system/status";
-			using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+			using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(3) };
 			var response = await client.GetAsync(testUrl);
 			SetIpv6Badge(response.IsSuccessStatusCode ? ConnectivityState.Ready : ConnectivityState.NotReady);
 		}
@@ -416,6 +494,32 @@ public sealed class HostStatusForm : Form
 		{
 			SetIpv6Badge(ConnectivityState.NotReady);
 		}
+	}
+
+	private async Task<bool> IsHostReachableLocallyAsync()
+	{
+		var port = GetBoundPort();
+		foreach (var localUrl in new[]
+		{
+			$"http://[::1]:{port}/api/system/status",
+			$"http://127.0.0.1:{port}/api/system/status"
+		})
+		{
+			try
+			{
+				using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+				using var response = await client.GetAsync(localUrl);
+				if (response.IsSuccessStatusCode)
+				{
+					return true;
+				}
+			}
+			catch
+			{
+			}
+		}
+
+		return false;
 	}
 
 	private void SetIpv6Badge(ConnectivityState state)
@@ -535,7 +639,7 @@ public sealed class HostStatusForm : Form
 		return wrapper;
 	}
 
-	private Panel BuildAddressRow(string caption, string address, string? copyValue, bool withStatusBadge)
+	private Panel BuildAddressRow(string caption, string address, string? copyValue, bool withStatusBadge, Action<Label, Button>? bindControls = null)
 	{
 		var row = new Panel
 		{
@@ -559,11 +663,13 @@ public sealed class HostStatusForm : Form
 		copyButton.Enabled = !string.IsNullOrWhiteSpace(copyValue);
 		copyButton.Click += (_, _) =>
 		{
-			if (!string.IsNullOrWhiteSpace(copyValue))
+			var latestValue = copyButton.Tag as string ?? copyValue;
+			if (!string.IsNullOrWhiteSpace(latestValue))
 			{
-				CopyToClipboard(copyValue);
+				CopyToClipboard(latestValue);
 			}
 		};
+		copyButton.Tag = copyValue;
 
 		var badgeWidth = withStatusBadge ? 72 : 0;
 		var statusBadge = CreateStatusBadge();
@@ -589,6 +695,8 @@ public sealed class HostStatusForm : Form
 		{
 			valueLabel.Width = copyButton.Left - 28;
 		}
+
+		bindControls?.Invoke(valueLabel, copyButton);
 
 		row.Controls.AddRange(new Control[] { captionLabel, valueLabel, statusBadge, copyButton });
 		return row;
