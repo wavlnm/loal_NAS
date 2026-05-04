@@ -35,6 +35,7 @@ public sealed class HostStatusForm : Form
 	private readonly string[] _boundUrls;
 	private readonly System.Windows.Forms.Timer _refreshTimer;
 	private IPAddress? _stableIpv6;
+	private string? _lastReportedIpv6;   // 上次成功上报到云端的地址，用于检测变化时立即同步
 	private IReadOnlyList<IPAddress> _lanIpv4;
 	private int _refreshInFlight;
 
@@ -429,12 +430,15 @@ public sealed class HostStatusForm : Form
 		{
 			_cloudSyncStatusLabel.Text = "暂无公网 IPv6 地址，跳过同步";
 			_cloudSyncStatusLabel.ForeColor = CTextMuted;
+			// 未检测到地址时也缩短到 8s 重试，而非 32s
+			_syncTickCount = 6;
 			return;
 		}
 
 		var (success, username, deviceName) = await TrySyncDeviceToCloudAsync();
 		if (success)
 		{
+			_lastReportedIpv6 = _stableIpv6?.ToString();
 			_cloudSyncStatusLabel.Text = $"地址已同步至云端 · {DateTime.Now:HH:mm:ss}";
 			_cloudSyncStatusLabel.ForeColor = CSuccess;
 
@@ -448,6 +452,8 @@ public sealed class HostStatusForm : Form
 		{
 			_cloudSyncStatusLabel.Text = $"地址同步失败（设备可能尚未注册）";
 			_cloudSyncStatusLabel.ForeColor = CTextMuted;
+			// 有地址但上报失败，8s 后重试（而非 32s）
+			_syncTickCount = 6;
 		}
 	}
 
@@ -466,7 +472,9 @@ public sealed class HostStatusForm : Form
 				deviceName = _deviceIdentity.DeviceName,
 				ipv6Address = ipv6,
 			});
-			using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+			// UseProxy = false：云端同步走直连，不受系统代理影响
+			using var handler = new System.Net.Http.HttpClientHandler { UseProxy = false };
+			using var client = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
 			using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
 			var response = await client.PutAsync("https://reportzs.me/nas-api/devices/by-device-id", content);
 			var body = await response.Content.ReadAsStringAsync();
@@ -498,7 +506,16 @@ public sealed class HostStatusForm : Form
 
 	private void RefreshNetworkAddressSnapshot()
 	{
+		var previous = _stableIpv6?.ToString();
 		_stableIpv6 = NetworkInfoService.GetStablePublicIpv6();
+		var current  = _stableIpv6?.ToString();
+
+		// IPv6 地址发生变化（包括 null→有值），立即触发云端同步
+		if (current != previous && !string.IsNullOrEmpty(current))
+		{
+			_syncTickCount = 8; // 下一个 tick 立即同步
+		}
+
 		_lanIpv4 = NetworkInfoService.GetLanIpv4Addresses();
 
 		_ipv6AddressLabel.Text = _stableIpv6?.ToString() ?? "未检测到稳定公网 IPv6 地址";
