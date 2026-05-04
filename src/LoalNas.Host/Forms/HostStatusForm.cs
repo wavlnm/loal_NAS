@@ -389,18 +389,23 @@ public sealed class HostStatusForm : Form
 		{
 			RefreshStorageUsage();
 			RefreshDevicesList();
-			await RefreshServiceAndNetworkAsync();
+
+			// 网络刷新单独捕获，失败时仅更新徽章，不阻断后续的 tick 计数和云同步
+			try
+			{
+				await RefreshServiceAndNetworkAsync();
+			}
+			catch
+			{
+				SetIpv6Badge(ConnectivityState.NotReady);
+			}
 
 			_syncTickCount++;
 			if (forceCloudSync || _syncTickCount >= 8)
 			{
 				_syncTickCount = 0;
-				await SyncDeviceToCloudAsync();
+				await SyncDeviceToCloudAsync(); // 内部已捕获所有异常，失败后下次仍会在 32s 后重试
 			}
-		}
-		catch
-		{
-			SetIpv6Badge(ConnectivityState.NotReady);
 		}
 		finally
 		{

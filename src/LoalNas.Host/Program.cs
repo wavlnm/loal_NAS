@@ -69,7 +69,18 @@ internal static class Program
 
  		builder.WebHost.ConfigureKestrel(options =>
 		{
-			options.Limits.MaxRequestBodySize = null;
+			// 默认请求体上限 500 MB（文件上传场景）；可按路由再单独放宽
+			options.Limits.MaxRequestBodySize = 500 * 1024 * 1024L;
+			// 请求行（URL + 方法）最大 4 KB，防超长 URL 攻击
+			options.Limits.MaxRequestLineSize = 4 * 1024;
+			// 所有请求头合计最大 16 KB
+			options.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
+			// 并发连接上限：防止大量空连接耗尽资源（Slowloris 等）
+			options.Limits.MaxConcurrentConnections = 200;
+			options.Limits.MaxConcurrentUpgradedConnections = 50; // WebSocket 等升级连接
+			// 慢速攻击防护：请求头必须在 10 s 内发完，Keep-Alive 空闲 60 s 后断开
+			options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
+			options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(60);
 		});
 
  		builder.Services.Configure<PublicHostOptions>(
@@ -110,6 +121,8 @@ internal static class Program
 		builder.Services.AddSingleton<DeviceIdentityService>();
 
 		var app = builder.Build();
+		// IP 限流 + 自动封禁（需在路由匹配之前执行）
+		app.UseMiddleware<LoalNas.Host.Services.IpRateLimitMiddleware>();
 		MapEndpoints(app);
 		return app;
 	}
