@@ -324,13 +324,14 @@ internal static class Program
 
 	/// <summary>
 	/// 将 Console.Out / Console.Error 重定向到按日期滚动的日志文件。
-	/// 日志目录：运行目录下的 logs/，文件名格式 host-yyyy-MM-dd.log。
+	/// 日志目录：当前工作目录下的 logs/，文件名格式 host-yyyy-MM-dd.log。
 	/// 保留最近 7 天，启动时自动清理更早的文件。
 	/// </summary>
 	private static void RedirectConsoleToFile()
 	{
 		try
 		{
+			// 使用可执行文件所在目录，安装包安装后为安装目录，开发时为 bin/Debug/net8.0/
 			var logsDir = Path.Combine(AppContext.BaseDirectory, "logs");
 			Directory.CreateDirectory(logsDir);
 
@@ -353,6 +354,9 @@ internal static class Program
 			var multi = new MultiTextWriter(Console.Out, writer);
 			Console.SetOut(multi);
 			Console.SetError(multi);
+
+			// 打印日志文件路径，方便定位
+			Console.WriteLine($"[LoalNas] Log file: {logFile}");
 		}
 		catch { /* 重定向失败时静默，不影响主流程 */ }
 	}
