@@ -12,6 +12,9 @@ internal static class Program
 	[STAThread]
 	private static void Main(string[] args)
 	{
+		// 将 Console 输出重定向到日志文件（按日期滚动，最多保留 7 天）
+		RedirectConsoleToFile();
+
 		var app = BuildApplication(args);
 		var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("LoalNas.Host.Startup");
 		var firewallEnsurer = app.Services.GetRequiredService<WindowsFirewallRuleEnsurer>();
@@ -70,7 +73,7 @@ internal static class Program
  		builder.WebHost.ConfigureKestrel(options =>
 		{
 			// 默认请求体上限 500 MB（文件上传场景）；可按路由再单独放宽
-			options.Limits.MaxRequestBodySize = 500 * 1024 * 1024L;
+			options.Limits.MaxRequestBodySize = 2 * 1024 * 1024 * 1024L;
 			// 请求行（URL + 方法）最大 4 KB，防超长 URL 攻击
 			options.Limits.MaxRequestLineSize = 4 * 1024;
 			// 所有请求头合计最大 16 KB
@@ -217,9 +220,174 @@ internal static class Program
 		};
 
 		app.MapMethods("/api/filebrowser", proxyMethods,
-			(HttpContext context, FileBrowserApiProxy proxy) => proxy.ProxyApiAsync(context, string.Empty));
+			(HttpContext context, FileBrowserProcessManager manager, FileBrowserApiProxy proxy, ILoggerFactory loggerFactory) =>
+			{
+				if (HttpMethods.IsPost(context.Request.Method) &&
+				    CheckDiskSpaceInsufficient(context, manager.SharedRootPath, loggerFactory, out var diskError))
+				{
+					return diskError!;
+				}
+				return proxy.ProxyApiAsync(context, string.Empty);
+			});
 		app.MapMethods("/api/filebrowser/{**path}", proxyMethods,
-			(HttpContext context, string path, FileBrowserApiProxy proxy) => proxy.ProxyApiAsync(context, path));
+			(HttpContext context, string path, FileBrowserProcessManager manager, FileBrowserApiProxy proxy, ILoggerFactory loggerFactory) =>
+			{
+				if (HttpMethods.IsPost(context.Request.Method) &&
+				    CheckDiskSpaceInsufficient(context, manager.SharedRootPath, loggerFactory, out var diskError))
+				{
+					return diskError!;
+				}
+				return proxy.ProxyApiAsync(context, path);
+			});
+	}
+
+	/// <summary>
+	/// 检查磁盘剩余空间是否足以容纳本次上传。
+	/// 要求：可用空间 > 上传大小 + 100 MB 盈余。
+	/// </summary>
+	/// <returns>true 表示空间不足，diskError 已填充；false 表示空间充足。</returns>
+	private static bool CheckDiskSpaceInsufficient(
+		HttpContext context,
+		string sharedRootPath,
+		ILoggerFactory loggerFactory,
+		out Task<IResult>? diskError)
+	{
+		diskError = null;
+		var logger = loggerFactory.CreateLogger("DiskSpaceCheck");
+		var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+		var path = context.Request.Path;
+
+		var contentLength = context.Request.ContentLength;
+		if (contentLength is null or <= 0)
+		{
+			logger.LogInformation(
+				"Upload request from {Ip} to {Path} has no Content-Length; bypassing disk check and forwarding to FileBrowser.",
+				ip, path);
+			return false;
+		}
+
+		const long surplusBytes = 100 * 1024 * 1024L; // 100 MB 盈余
+		try
+		{
+			var driveRoot = Path.GetPathRoot(Path.GetFullPath(sharedRootPath));
+			if (string.IsNullOrWhiteSpace(driveRoot))
+			{
+				logger.LogWarning(
+					"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): could not resolve drive root from shared path '{SharedPath}'; bypassing disk check.",
+					ip, path, contentLength.Value / (1024.0 * 1024), sharedRootPath);
+				return false;
+			}
+
+			var drive = new DriveInfo(driveRoot);
+			if (!drive.IsReady)
+			{
+				logger.LogWarning(
+					"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): drive '{Drive}' is not ready; bypassing disk check.",
+					ip, path, contentLength.Value / (1024.0 * 1024), driveRoot);
+				return false;
+			}
+
+			var available = drive.AvailableFreeSpace;
+			if (available >= contentLength + surplusBytes)
+			{
+				logger.LogDebug(
+					"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): disk check passed (available {AvailMb:F0} MB).",
+					ip, path, contentLength.Value / (1024.0 * 1024), available / (1024.0 * 1024));
+				return false;
+			}
+
+			var availableMb = available / (1024.0 * 1024);
+			var requiredMb = (contentLength.Value + surplusBytes) / (1024.0 * 1024);
+			logger.LogWarning(
+				"Upload rejected for {Ip} to {Path}: insufficient disk space. File {SizeMb:F1} MB, available {AvailMb:F0} MB, required {ReqMb:F0} MB (incl. 100 MB surplus).",
+				ip, path, contentLength.Value / (1024.0 * 1024), availableMb, requiredMb);
+
+			diskError = Task.FromResult(Results.Json(
+				new
+				{
+					error = "insufficient_disk_space",
+					detail = $"磁盘剩余空间不足。可用 {availableMb:F0} MB，需要至少 {requiredMb:F0} MB（含 100 MB 盈余）。",
+					availableBytes = available,
+					requiredBytes = contentLength.Value + surplusBytes
+				},
+				statusCode: StatusCodes.Status507InsufficientStorage));
+			return true;
+		}
+		catch (Exception ex)
+		{
+			logger.LogWarning(ex,
+				"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): disk space check threw an exception; bypassing and forwarding to FileBrowser.",
+				ip, path, contentLength.Value / (1024.0 * 1024));
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// 将 Console.Out / Console.Error 重定向到按日期滚动的日志文件。
+	/// 日志目录：运行目录下的 logs/，文件名格式 host-yyyy-MM-dd.log。
+	/// 保留最近 7 天，启动时自动清理更早的文件。
+	/// </summary>
+	private static void RedirectConsoleToFile()
+	{
+		try
+		{
+			var logsDir = Path.Combine(AppContext.BaseDirectory, "logs");
+			Directory.CreateDirectory(logsDir);
+
+			// 清理 7 天前的旧日志
+			var cutoff = DateTime.UtcNow.AddDays(-7);
+			foreach (var old in Directory.EnumerateFiles(logsDir, "host-*.log"))
+			{
+				try
+				{
+					if (File.GetLastWriteTimeUtc(old) < cutoff)
+						File.Delete(old);
+				}
+				catch { /* 删除失败不阻断启动 */ }
+			}
+
+			var logFile = Path.Combine(logsDir, $"host-{DateTime.Now:yyyy-MM-dd}.log");
+			var writer = new StreamWriter(logFile, append: true, System.Text.Encoding.UTF8) { AutoFlush = true };
+
+			// 同时保留控制台输出（如果有控制台窗口的话）
+			var multi = new MultiTextWriter(Console.Out, writer);
+			Console.SetOut(multi);
+			Console.SetError(multi);
+		}
+		catch { /* 重定向失败时静默，不影响主流程 */ }
+	}
+
+	/// <summary>将写操作同时转发给多个 TextWriter。</summary>
+	private sealed class MultiTextWriter(params TextWriter[] writers) : TextWriter
+	{
+		public override System.Text.Encoding Encoding => writers[0].Encoding;
+
+		public override void Write(char value)
+		{
+			foreach (var w in writers) w.Write(value);
+		}
+
+		public override void Write(string? value)
+		{
+			foreach (var w in writers) w.Write(value);
+		}
+
+		public override void WriteLine(string? value)
+		{
+			foreach (var w in writers) w.WriteLine(value);
+		}
+
+		public override void Flush()
+		{
+			foreach (var w in writers) w.Flush();
+		}
+
+		protected override void Dispose(bool disposing)
+		{
+			if (disposing)
+				foreach (var w in writers) w.Dispose();
+			base.Dispose(disposing);
+		}
 	}
 
 	private static StorageSnapshot? TryCreateStorageSnapshot(string sharedRootPath)
