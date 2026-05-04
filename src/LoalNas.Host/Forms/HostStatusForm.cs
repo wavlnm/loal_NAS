@@ -54,6 +54,18 @@ public sealed class HostStatusForm : Form
 	private Label _cloudSyncStatusLabel = null!;
 	private int _syncTickCount;
 
+	// ── 注册状态机 ────────────────────────────────────────────────────────────
+	private enum RegistrationState { Unregistered, Registering, Registered }
+	private RegistrationState _regState = RegistrationState.Unregistered;
+	private string? _regUsername;
+	private Panel _unregisteredPanel = null!;
+	private Panel _registeringPanel = null!;
+	private Panel _registeredPanel = null!;
+	private Label _regUsernameValueLabel = null!;
+	private Label _regDeviceNameValueLabel = null!;
+	private System.Windows.Forms.Timer? _registrationPollTimer;
+	private DateTime _registrationStartTime;
+
 	private enum ConnectivityState { Testing, Ready, NotReady, NoAddress }
 
 	public HostStatusForm(
@@ -178,59 +190,8 @@ public sealed class HostStatusForm : Form
 	{
 		var panel = new Panel { Dock = DockStyle.Fill, BackColor = CBg, Margin = new Padding(0) };
 
-		var deviceCard = BuildCard(LeftW, 350);
+		var deviceCard = BuildDeviceCard();
 		deviceCard.Location = new Point(0, 0);
-		deviceCard.Controls.Add(MakeSectionTitle("设备绑定", "使用手机客户端扫码绑定设备", 20, 20));
-
-		var qrShell = new Panel
-		{
-			Location = new Point(24, 92),
-			Size = new Size(168, 168),
-			BackColor = Color.White,
-			Padding = new Padding(12),
-		};
-		ApplyRoundedRegion(qrShell, 22);
-		qrShell.Paint += (_, e) => DrawRoundedBorder(e, qrShell.ClientRectangle, 22, CBorder);
-
-		try
-		{
-			_deviceBindingQrImage = CreateDeviceBindingQrImage();
-			var qrPictureBox = new PictureBox
-			{
-				Dock = DockStyle.Fill,
-				BackColor = Color.White,
-				Image = _deviceBindingQrImage,
-				SizeMode = PictureBoxSizeMode.Zoom,
-				TabStop = false,
-			};
-			qrShell.Controls.Add(qrPictureBox);
-		}
-		catch
-		{
-			var qrFallback = new Label
-			{
-				Text = "二维码生成失败\n请复制设备 ID 手动绑定",
-				ForeColor = CTextMuted,
-				Dock = DockStyle.Fill,
-				TextAlign = ContentAlignment.MiddleCenter,
-				Font = new Font("Segoe UI", 10f, FontStyle.Bold),
-			};
-			qrShell.Controls.Add(qrFallback);
-		}
-
-		deviceCard.Controls.Add(qrShell);
-		deviceCard.Controls.Add(BuildInfoPair("设备名称", _deviceIdentity.DeviceName, 222, 102, 304, 34, 13f, false));
-		deviceCard.Controls.Add(BuildInfoPair("设备 ID", _deviceIdentity.DeviceId, 222, 174, 260, 56, 10.2f, true));
-
-		var copyDeviceIdButton = CreateIconButton();
-		copyDeviceIdButton.Location = new Point(490, 201);
-		copyDeviceIdButton.Click += (_, _) => CopyToClipboard(_deviceIdentity.DeviceId);
-
-		var openWebMiniButton = CreateFilledButton("打开管理页", 304, 38);
-		openWebMiniButton.Location = new Point(222, 280);
-		openWebMiniButton.Click += (_, _) => OpenUrl(_fileBrowserManager.BaseAddress.ToString());
-
-		deviceCard.Controls.AddRange(new Control[] { copyDeviceIdButton, openWebMiniButton });
 
 		var storageCard = BuildCard(LeftW, 252);
 		storageCard.Location = new Point(0, 374);
@@ -471,6 +432,32 @@ public sealed class HostStatusForm : Form
 			return;
 		}
 
+		var (success, username, deviceName) = await TrySyncDeviceToCloudAsync();
+		if (success)
+		{
+			_cloudSyncStatusLabel.Text = $"地址已同步至云端 · {DateTime.Now:HH:mm:ss}";
+			_cloudSyncStatusLabel.ForeColor = CSuccess;
+
+			// 首次同步成功说明设备已注册，切换到已注册界面
+			if (_regState == RegistrationState.Unregistered)
+			{
+				ApplyRegisteredState(username, deviceName);
+			}
+		}
+		else
+		{
+			_cloudSyncStatusLabel.Text = $"地址同步失败（设备可能尚未注册）";
+			_cloudSyncStatusLabel.ForeColor = CTextMuted;
+		}
+	}
+
+	/// <summary>向云端同步当前 IPv6 地址，返回是否成功及注册用户信息。</summary>
+	private async Task<(bool Success, string? Username, string? DeviceName)> TrySyncDeviceToCloudAsync()
+	{
+		var ipv6 = _stableIpv6?.ToString();
+		if (string.IsNullOrEmpty(ipv6))
+			return (false, null, null);
+
 		try
 		{
 			var payload = System.Text.Json.JsonSerializer.Serialize(new
@@ -485,32 +472,27 @@ public sealed class HostStatusForm : Form
 			var body = await response.Content.ReadAsStringAsync();
 
 			bool success = false;
-			string? error = null;
+			string? username = null;
+			string? deviceName = null;
 			try
 			{
 				using var doc = System.Text.Json.JsonDocument.Parse(body);
 				if (doc.RootElement.TryGetProperty("success", out var s))
 					success = s.GetBoolean();
-				if (!success && doc.RootElement.TryGetProperty("error", out var err))
-					error = err.GetString();
+
+				if (success && doc.RootElement.TryGetProperty("user", out var user))
+				{
+					if (user.TryGetProperty("username", out var u)) username = u.GetString();
+					if (user.TryGetProperty("deviceName", out var dn)) deviceName = dn.GetString();
+				}
 			}
 			catch { }
 
-			if (success)
-			{
-				_cloudSyncStatusLabel.Text = $"地址已同步至云端 · {DateTime.Now:HH:mm:ss}";
-				_cloudSyncStatusLabel.ForeColor = CSuccess;
-			}
-			else
-			{
-				_cloudSyncStatusLabel.Text = $"地址同步失败: {error ?? "未知错误"}";
-				_cloudSyncStatusLabel.ForeColor = CDanger;
-			}
+			return (success, username, deviceName);
 		}
-		catch (Exception ex)
+		catch
 		{
-			_cloudSyncStatusLabel.Text = $"地址同步失败: {ex.Message}";
-			_cloudSyncStatusLabel.ForeColor = CDanger;
+			return (false, null, null);
 		}
 	}
 
@@ -706,6 +688,243 @@ public sealed class HostStatusForm : Form
 		}
 
 		return 5034;
+	}
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// 设备卡片（状态机驱动：未注册 → 注册中 → 已注册）
+	// ══════════════════════════════════════════════════════════════════════════
+
+	private Panel BuildDeviceCard()
+	{
+		var card = BuildCard(LeftW, 350);
+
+		// ── ① 未注册 panel ─────────────────────────────────────────────────
+		_unregisteredPanel = new Panel
+		{
+			Location = new Point(0, 0),
+			Size = new Size(LeftW, 350),
+			BackColor = Color.Transparent,
+			Visible = true,
+		};
+		_unregisteredPanel.Controls.Add(MakeSectionTitle("设备注册", "绑定账号后可通过手机客户端随时访问此设备", 20, 20));
+
+		var descLabel = new Label
+		{
+			Text = "注册后，你的手机客户端可通过扫码与此设备完成绑定。\n\n"
+				 + "注册仅记录设备 ID 和网络地址，不会上传任何文件。\n"
+				 + "若你已有账号，请直接在手机端登录，无需再次注册。",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9.5f),
+			Location = new Point(24, 92),
+			Size = new Size(LeftW - 48, 140),
+			AutoSize = false,
+		};
+
+		var registerButton = CreateFilledButton("立即注册（显示二维码）", LeftW - 48, 44);
+		registerButton.Location = new Point(24, 280);
+		registerButton.Click += (_, _) => StartRegistration();
+
+		_unregisteredPanel.Controls.AddRange(new Control[] { descLabel, registerButton });
+
+		// ── ② 注册中 panel ─────────────────────────────────────────────────
+		_registeringPanel = new Panel
+		{
+			Location = new Point(0, 0),
+			Size = new Size(LeftW, 350),
+			BackColor = Color.Transparent,
+			Visible = false,
+		};
+		_registeringPanel.Controls.Add(MakeSectionTitle("设备绑定", "使用手机客户端扫码注册", 20, 20));
+
+		var qrShell = new Panel
+		{
+			Location = new Point(24, 92),
+			Size = new Size(168, 168),
+			BackColor = Color.White,
+			Padding = new Padding(12),
+		};
+		ApplyRoundedRegion(qrShell, 22);
+		qrShell.Paint += (_, e) => DrawRoundedBorder(e, qrShell.ClientRectangle, 22, CBorder);
+
+		try
+		{
+			_deviceBindingQrImage = CreateDeviceBindingQrImage();
+			var qrPictureBox = new PictureBox
+			{
+				Dock = DockStyle.Fill,
+				BackColor = Color.White,
+				Image = _deviceBindingQrImage,
+				SizeMode = PictureBoxSizeMode.Zoom,
+				TabStop = false,
+			};
+			qrShell.Controls.Add(qrPictureBox);
+		}
+		catch
+		{
+			var qrFallback = new Label
+			{
+				Text = "二维码生成失败\n请复制设备 ID 手动绑定",
+				ForeColor = CTextMuted,
+				Dock = DockStyle.Fill,
+				TextAlign = ContentAlignment.MiddleCenter,
+				Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+			};
+			qrShell.Controls.Add(qrFallback);
+		}
+
+		_registeringPanel.Controls.Add(qrShell);
+		_registeringPanel.Controls.Add(BuildInfoPair("设备名称", _deviceIdentity.DeviceName, 222, 102, 304, 34, 13f, false));
+		_registeringPanel.Controls.Add(BuildInfoPair("设备 ID", _deviceIdentity.DeviceId, 222, 174, 260, 56, 10.2f, true));
+
+		var copyDeviceIdButton = CreateIconButton();
+		copyDeviceIdButton.Location = new Point(490, 201);
+		copyDeviceIdButton.Click += (_, _) => CopyToClipboard(_deviceIdentity.DeviceId);
+
+		var waitLabel = new Label
+		{
+			Text = "等待手机扫码... (3 分钟后自动取消)",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 8.8f),
+			Location = new Point(222, 274),
+			AutoSize = true,
+		};
+
+		var cancelButton = CreateOutlineButton("取消", 100, 32);
+		cancelButton.Location = new Point(LeftW - 120, 10);
+		cancelButton.Click += (_, _) => CancelRegistration();
+
+		_registeringPanel.Controls.AddRange(new Control[] { copyDeviceIdButton, waitLabel, cancelButton });
+
+		// ── ③ 已注册 panel ─────────────────────────────────────────────────
+		_registeredPanel = new Panel
+		{
+			Location = new Point(0, 0),
+			Size = new Size(LeftW, 350),
+			BackColor = Color.Transparent,
+			Visible = false,
+		};
+		_registeredPanel.Controls.Add(MakeSectionTitle("设备绑定", "账号与设备已绑定", 20, 20));
+
+		var successBadge = new Label
+		{
+			Text = "✓ 已注册",
+			ForeColor = CSuccess,
+			BackColor = CSuccessSoft,
+			Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+			Location = new Point(24, 92),
+			AutoSize = false,
+			Size = new Size(100, 28),
+			TextAlign = ContentAlignment.MiddleCenter,
+		};
+		ApplyRoundedRegion(successBadge, 8);
+
+		_regUsernameValueLabel = new Label
+		{
+			Text = "—",
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 18f, FontStyle.Bold),
+			Location = new Point(24, 136),
+			AutoSize = true,
+		};
+
+		var regUsernameCaptionLabel = new Label
+		{
+			Text = "账号",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 8.8f),
+			Location = new Point(24, 120),
+			AutoSize = true,
+		};
+
+		_regDeviceNameValueLabel = new Label
+		{
+			Text = _deviceIdentity.DeviceName,
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 13f, FontStyle.Bold),
+			Location = new Point(24, 210),
+			AutoSize = true,
+		};
+
+		var regDeviceNameCaptionLabel = new Label
+		{
+			Text = "设备名称",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 8.8f),
+			Location = new Point(24, 194),
+			AutoSize = true,
+		};
+
+		var openWebMiniButton = CreateFilledButton("打开管理页", LeftW - 48, 38);
+		openWebMiniButton.Location = new Point(24, 280);
+		openWebMiniButton.Click += (_, _) => OpenUrl(_fileBrowserManager.BaseAddress.ToString());
+
+		_registeredPanel.Controls.AddRange(new Control[] {
+			successBadge, regUsernameCaptionLabel, _regUsernameValueLabel,
+			regDeviceNameCaptionLabel, _regDeviceNameValueLabel, openWebMiniButton,
+		});
+
+		card.Controls.AddRange(new Control[] { _unregisteredPanel, _registeringPanel, _registeredPanel });
+		return card;
+	}
+
+	private void SwitchRegistrationPanel(RegistrationState state)
+	{
+		if (InvokeRequired) { BeginInvoke(() => SwitchRegistrationPanel(state)); return; }
+		_regState = state;
+		_unregisteredPanel.Visible = state == RegistrationState.Unregistered;
+		_registeringPanel.Visible  = state == RegistrationState.Registering;
+		_registeredPanel.Visible   = state == RegistrationState.Registered;
+	}
+
+	private void StartRegistration()
+	{
+		SwitchRegistrationPanel(RegistrationState.Registering);
+		_registrationStartTime = DateTime.UtcNow;
+
+		_registrationPollTimer?.Stop();
+		_registrationPollTimer?.Dispose();
+		_registrationPollTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+		_registrationPollTimer.Tick += async (_, _) => await RegistrationPollTickAsync();
+		_registrationPollTimer.Start();
+	}
+
+	private void CancelRegistration()
+	{
+		_registrationPollTimer?.Stop();
+		_registrationPollTimer?.Dispose();
+		_registrationPollTimer = null;
+		SwitchRegistrationPanel(RegistrationState.Unregistered);
+	}
+
+	private async Task RegistrationPollTickAsync()
+	{
+		// 3 分钟超时
+		if ((DateTime.UtcNow - _registrationStartTime).TotalMinutes >= 3)
+		{
+			_registrationPollTimer?.Stop();
+			_registrationPollTimer?.Dispose();
+			_registrationPollTimer = null;
+			SwitchRegistrationPanel(RegistrationState.Unregistered);
+			return;
+		}
+
+		var (success, username, deviceName) = await TrySyncDeviceToCloudAsync();
+		if (success)
+		{
+			_registrationPollTimer?.Stop();
+			_registrationPollTimer?.Dispose();
+			_registrationPollTimer = null;
+			ApplyRegisteredState(username, deviceName);
+		}
+	}
+
+	private void ApplyRegisteredState(string? username, string? deviceName)
+	{
+		if (InvokeRequired) { BeginInvoke(() => ApplyRegisteredState(username, deviceName)); return; }
+		_regUsername = username;
+		_regUsernameValueLabel.Text = username ?? "—";
+		_regDeviceNameValueLabel.Text = deviceName ?? _deviceIdentity.DeviceName;
+		SwitchRegistrationPanel(RegistrationState.Registered);
 	}
 
 	private static Panel BuildCard(int width, int height)
@@ -940,6 +1159,7 @@ public sealed class HostStatusForm : Form
 		{
 			deviceId = _deviceIdentity.DeviceId,
 			deviceName = _deviceIdentity.DeviceName,
+			secret = _deviceIdentity.DeviceSecret,
 		});
 	}
 

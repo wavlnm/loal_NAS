@@ -8,11 +8,14 @@ public sealed class DeviceIdentityService
 {
 	public string DeviceName { get; }
 	public string DeviceId { get; }
+	/// <summary>随机 32 字节 hex 字符串，首次启动生成后持久化保存。用于二维码中对手机端的信任标识。</summary>
+	public string DeviceSecret { get; }
 
 	public DeviceIdentityService()
 	{
 		DeviceName = Environment.MachineName;
 		DeviceId = GetOrCreateStableDeviceId();
+		DeviceSecret = GetOrCreateDeviceSecret();
 	}
 
 	private static string GetOrCreateStableDeviceId()
@@ -60,6 +63,37 @@ public sealed class DeviceIdentityService
 		catch
 		{
 			return null;
+		}
+	}
+
+	private static string GetOrCreateDeviceSecret()
+	{
+		var dataDirectory = Path.Combine(
+			Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+			"loal_NAS");
+		var secretFilePath = Path.Combine(dataDirectory, "device-secret.txt");
+
+		try
+		{
+			if (File.Exists(secretFilePath))
+			{
+				var existing = File.ReadAllText(secretFilePath).Trim();
+				if (!string.IsNullOrWhiteSpace(existing))
+					return existing;
+			}
+
+			Directory.CreateDirectory(dataDirectory);
+			var bytes = RandomNumberGenerator.GetBytes(32);
+			var secret = Convert.ToHexString(bytes).ToLowerInvariant();
+			File.WriteAllText(secretFilePath, secret);
+			return secret;
+		}
+		catch
+		{
+			// 回退：由机器名哈希派生，稳定但非随机
+			return Convert.ToHexString(SHA256.HashData(
+				Encoding.UTF8.GetBytes("secret-" + Environment.MachineName + Environment.UserName)))
+				.ToLowerInvariant()[..64];
 		}
 	}
 
