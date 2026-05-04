@@ -126,6 +126,8 @@ internal static class Program
 		var app = builder.Build();
 		// IP 限流 + 自动封禁（需在路由匹配之前执行）
 		app.UseMiddleware<LoalNas.Host.Services.IpRateLimitMiddleware>();
+		// 手机端访问鉴权（基于扫码分发的 secret + 时间戳 + nonce）
+		app.UseMiddleware<LoalNas.Host.Services.PhoneAuthMiddleware>();
 		MapEndpoints(app);
 		return app;
 	}

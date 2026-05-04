@@ -733,7 +733,18 @@ public sealed class HostStatusForm : Form
 			ForeColor = CTextMuted,
 			Font = new Font("Segoe UI", 9.5f),
 			Location = new Point(24, 92),
-			Size = new Size(LeftW - 48, 140),
+			Size = new Size(LeftW - 48, 100),
+			AutoSize = false,
+		};
+
+		// 扫码授权说明（即使不注册也必须扫码）
+		var authNoteLabel = new Label
+		{
+			Text = "⚠ 即使不注册云账号，也需要先扫描二维码完成一次访问授权，否则电脑端将拒绝手机的连接请求。",
+			ForeColor = Color.FromArgb(180, 100, 0),
+			Font = new Font("Segoe UI", 9f, FontStyle.Regular),
+			Location = new Point(24, 200),
+			Size = new Size(LeftW - 48, 68),
 			AutoSize = false,
 		};
 
@@ -741,7 +752,7 @@ public sealed class HostStatusForm : Form
 		registerButton.Location = new Point(24, 280);
 		registerButton.Click += (_, _) => StartRegistration();
 
-		_unregisteredPanel.Controls.AddRange(new Control[] { descLabel, registerButton });
+		_unregisteredPanel.Controls.AddRange(new Control[] { descLabel, authNoteLabel, registerButton });
 
 		// ── ② 注册中 panel ─────────────────────────────────────────────────
 		_registeringPanel = new Panel

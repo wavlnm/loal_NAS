@@ -14,9 +14,9 @@ internal sealed class IpRateLimitMiddleware
 {
     // ── 可调参数 ─────────────────────────────────────────────────────────────
     private const int WindowSeconds     = 10;   // 限流窗口长度
-    private const int MaxRequests       = 60;   // 窗口内允许的最大请求数
-    private const int BanAfterRejections = 10;  // 窗口内被拒绝多少次后封禁
-    private const int BanMinutes        = 5;    // 封禁时长（分钟）
+    private const int MaxRequests       = 300;  // 窗口内允许的最大请求数（30次/秒，个人 NAS 宽松）
+    private const int BanAfterRejections = 100; // 连续触发100次限制才封禁（个人设备，正常不会达到）
+    private const int BanMinutes        = 2;    // 封禁时长（分钟）
     // ─────────────────────────────────────────────────────────────────────────
 
     private sealed record WindowEntry(long WindowStart, int Count, int Rejections);

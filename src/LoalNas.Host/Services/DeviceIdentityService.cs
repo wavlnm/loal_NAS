@@ -78,14 +78,17 @@ public sealed class DeviceIdentityService
 			if (File.Exists(secretFilePath))
 			{
 				var existing = File.ReadAllText(secretFilePath).Trim();
-				if (!string.IsNullOrWhiteSpace(existing))
-					return existing;
+				if (existing.Length == 65)
+				{
+					return DecodeSecret(existing);
+				}
+				// 长度不对说明文件损坏，重新生成
 			}
 
 			Directory.CreateDirectory(dataDirectory);
 			var bytes = RandomNumberGenerator.GetBytes(32);
 			var secret = Convert.ToHexString(bytes).ToLowerInvariant();
-			File.WriteAllText(secretFilePath, secret);
+			File.WriteAllText(secretFilePath, EncodeSecret(secret));
 			return secret;
 		}
 		catch
@@ -95,6 +98,35 @@ public sealed class DeviceIdentityService
 				Encoding.UTF8.GetBytes("secret-" + Environment.MachineName + Environment.UserName)))
 				.ToLowerInvariant()[..64];
 		}
+	}
+
+	/// <summary>
+	/// 对 secret 进行简单混淆再落盘（防止明文一眼可读）。
+	/// 规则：交换 index 2 与 index 6，然后在 index 8 位置插入字符 '5'。
+	/// 最终存储字符串长 65。
+	/// </summary>
+	private static string EncodeSecret(string secret)
+	{
+		var chars = secret.ToCharArray();
+		(chars[2], chars[6]) = (chars[6], chars[2]);
+		// 在 index 8 插入 '5'
+		var result = new char[chars.Length + 1];
+		chars[..8].CopyTo(result, 0);
+		result[8] = '5';
+		chars[8..].CopyTo(result, 9);
+		return new string(result);
+	}
+
+	/// <summary>从混淆格式还原明文 secret。<br/>
+	/// encoded 应为 65 字符；黄令格式时抛出异常。</summary>
+	private static string DecodeSecret(string encoded)
+	{
+		if (encoded.Length != 65)
+			throw new FormatException($"SecretStore: expected 65 chars, got {encoded.Length}");
+		// 删除 index 8 的 '5'
+		var chars = (encoded[..8] + encoded[9..]).ToCharArray();
+		(chars[2], chars[6]) = (chars[6], chars[2]);
+		return new string(chars);
 	}
 
 	private static string HashToDisplayId(string raw)
