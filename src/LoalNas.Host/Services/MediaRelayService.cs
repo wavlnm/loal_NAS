@@ -82,8 +82,18 @@ public sealed class MediaRelayService(
 
 			await CopyProxyResponseAsync(context, responseMessage);
 		}
+		catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+		{
+			logger.LogDebug("Media relay request was canceled by the client.");
+		}
 		catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
 		{
+			if (context.Response.HasStarted)
+			{
+				logger.LogDebug(exception, "Media relay stream ended after the response started.");
+				return;
+			}
+
 			logger.LogWarning(exception, "Media relay request to FileBrowser failed.");
 
 			context.Response.StatusCode = (int)HttpStatusCode.BadGateway;
