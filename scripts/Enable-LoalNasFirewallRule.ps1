@@ -1,6 +1,6 @@
 param(
     [int]$Port = 5034,
-    [string]$RuleName = "loal_NAS Host TCP 5034",
+    [string]$RuleName = "千私云 电脑访问 TCP 5034",
     [ValidateSet("Any", "Domain", "Private", "Public")]
     [string[]]$Profiles = @("Any")
 )
@@ -17,7 +17,7 @@ if ($existingRule) {
 
 $ruleParameters = @{
     DisplayName = $RuleName
-    Description = "Allow inbound TCP traffic for loal_NAS host on port $Port"
+    Description = "允许千私云通过 TCP $Port 端口接收来自其他设备的访问"
     Direction = "Inbound"
     Action = "Allow"
     Enabled = "True"

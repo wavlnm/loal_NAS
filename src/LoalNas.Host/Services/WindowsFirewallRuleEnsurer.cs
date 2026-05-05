@@ -119,7 +119,7 @@ public sealed class WindowsFirewallRuleEnsurer(IOptions<FirewallOptions> options
             return false;
         }
 
-        var ruleName = $"loal_NAS Host TCP {port}";
+        var ruleName = $"千私云 电脑访问 TCP {port}";
         var profiles = _options.Profiles.Length == 0 ? ["Private"] : _options.Profiles;
 
         try

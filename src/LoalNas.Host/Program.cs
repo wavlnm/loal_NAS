@@ -139,7 +139,7 @@ internal static class Program
 			var storage = TryCreateStorageSnapshot(manager.SharedRootPath);
 			return Results.Ok(new
 			{
-				name = "loal_NAS MVP host",
+				name = "千私云电脑",
 				fileBrowser = new
 				{
 					running = manager.IsRunning,
@@ -161,7 +161,7 @@ internal static class Program
 			var storage = TryCreateStorageSnapshot(manager.SharedRootPath);
 			return Results.Ok(new
 			{
-				name = "loal_NAS MVP host",
+				name = "千私云电脑",
 				fileBrowser = new
 				{
 					running = manager.IsRunning,

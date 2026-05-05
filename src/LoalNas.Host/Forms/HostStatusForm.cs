@@ -727,8 +727,8 @@ public sealed class HostStatusForm : Form
 
 		var descLabel = new Label
 		{
-			Text = "注册后，你的手机客户端可通过扫码与此设备完成绑定。\n\n"
-				 + "注册仅记录设备 ID 和网络地址，不会上传任何文件。\n"
+			Text = "注册后，你的手机客户端可从云端获取此设备实时地址。\n\n"
+				 + "注册仅记录设备 ID 和网络地址，文件传输不会经过云端中转。\n"
 				 + "若你已有账号，请直接在手机端登录，无需再次注册。",
 			ForeColor = CTextMuted,
 			Font = new Font("Segoe UI", 9.5f),
