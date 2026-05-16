@@ -98,7 +98,208 @@ public sealed class HostStatusForm : Form
 	private async void OnShown(object? sender, EventArgs e)
 	{
 		await RefreshDynamicAsync(forceCloudSync: true);
+		ShowStartupNetworkGuide();
 		_refreshTimer.Start();
+	}
+
+	private void ShowStartupNetworkGuide()
+	{
+		using var dialog = CreateStartupNetworkGuideDialog();
+		dialog.ShowDialog(this);
+	}
+
+	private Form CreateStartupNetworkGuideDialog()
+	{
+		var port = GetBoundPort();
+		var hasPublicIpv6 = _stableIpv6 is not null;
+		var detectedIpv6 = _stableIpv6?.ToString() ?? "未检测到稳定公网 IPv6 地址";
+		var firewallCommand = BuildFirewallCommand(port);
+
+		var dialog = new Form
+		{
+			Text = "网络连接提示",
+			StartPosition = FormStartPosition.CenterParent,
+			ClientSize = new Size(840, 760),
+			MinimumSize = new Size(840, 760),
+			MaximumSize = new Size(840, 760),
+			FormBorderStyle = FormBorderStyle.FixedDialog,
+			ShowIcon = false,
+			MaximizeBox = false,
+			MinimizeBox = false,
+			BackColor = CBg,
+			Font = new Font("Segoe UI", 9f),
+		};
+
+		var root = new Panel
+		{
+			Dock = DockStyle.Fill,
+			BackColor = CBg,
+			AutoScroll = true,
+		};
+		dialog.Controls.Add(root);
+
+		var content = new Panel
+		{
+			Location = new Point(24, 24),
+			Size = new Size(760, 724),
+			BackColor = CBg,
+		};
+		root.Controls.Add(content);
+
+		var titleLabel = new Label
+		{
+			Text = "启动前网络检查",
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 18f, FontStyle.Bold),
+			AutoSize = true,
+			Location = new Point(0, 0),
+		};
+
+		var titleHintLabel = new Label
+		{
+			Text = "即使没有公网连接，也可以通过局域网访问",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9.8f),
+			AutoSize = true,
+			Location = new Point(titleLabel.PreferredWidth + 12, 10),
+		};
+
+		var statusCard = BuildCard(748, 182);
+		statusCard.Location = new Point(0, 54);
+		statusCard.Controls.Add(MakeSectionTitle("公网 IPv6 检测", "检测结果仅代表这台电脑当前的外网 IPv6 条件。", 20, 20));
+
+		var statusBadge = new Label
+		{
+			Text = hasPublicIpv6 ? "已检测到" : "未检测到",
+			Size = new Size(88, 30),
+			TextAlign = ContentAlignment.MiddleCenter,
+			Font = new Font("Segoe UI", 8.8f, FontStyle.Bold),
+			ForeColor = hasPublicIpv6 ? CSuccess : CWarning,
+			BackColor = hasPublicIpv6 ? CSuccessSoft : CWarningSoft,
+			Location = new Point(20, 84),
+		};
+		ApplyRoundedRegion(statusBadge, 15);
+
+		var resultLabel = new Label
+		{
+			Text = hasPublicIpv6
+				? $"当前公网 IPv6 地址：{detectedIpv6}"
+				: "当前电脑还没有检测到稳定公网 IPv6 地址。",
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+			AutoSize = false,
+			Size = new Size(580, 24),
+			Location = new Point(20, 122),
+		};
+
+		var detailLabel = new Label
+		{
+			Text = hasPublicIpv6
+				? $"这说明电脑端具备 IPv6 直连基础条件。若手机仍连不上，请继续检查手机网络是否支持 IPv6，以及光猫、路由器和防火墙是否允许 TCP {port}。"
+				: $"这通常意味着当前外网 IPv6 直连不可用。请确认运营商已分配 IPv6，光猫和路由器都已开启 IPv6，并允许 TCP {port} 入站访问。",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9.2f),
+			AutoSize = false,
+			Size = new Size(700, 42),
+			Location = new Point(20, 148),
+		};
+
+		statusCard.Controls.AddRange(new Control[] { statusBadge, resultLabel, detailLabel });
+
+		if (hasPublicIpv6)
+		{
+			var copyIpv6Button = CreateOutlineButton("复制 IPv6", 102, 32);
+			copyIpv6Button.Location = new Point(626, 118);
+			copyIpv6Button.Click += (_, _) => CopyToClipboard(detectedIpv6);
+			statusCard.Controls.Add(copyIpv6Button);
+		}
+
+		var checklistCard = BuildCard(748, 182);
+		checklistCard.Location = new Point(0, 252);
+		checklistCard.Controls.Add(MakeSectionTitle("外网连接前请确认", "以下几项缺一项，都可能导致手机从外网连不上这台电脑。", 20, 20));
+
+		var checklistLabel = new Label
+		{
+			Text = $"1. 光猫开启 IPv6；如果光猫带有 IPv6 防火墙或访问控制，也要放行 TCP {port}。\n"
+				 + $"2. 路由器开启 IPv6；如果路由器启用了 IPv6 防火墙，也要放行 TCP {port}。\n"
+				 + $"3. 电脑的 Windows 防火墙要允许 TCP {port} 入站访问。\n"
+				 + "4. 手机当前所处的网络也需要支持 IPv6；部分公司 Wi-Fi、校园网或运营商网络可能不支持。",
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 9.5f),
+			AutoSize = false,
+			Size = new Size(700, 82),
+			Location = new Point(24, 86),
+		};
+		checklistCard.Controls.Add(checklistLabel);
+
+		var commandCard = BuildCard(748, 184);
+		commandCard.Location = new Point(0, 450);
+		commandCard.Controls.Add(MakeSectionTitle("电脑防火墙放行命令", "请在管理员 PowerShell 或终端中执行；如果已经放行，可忽略。", 20, 20));
+
+		var commandShell = new Panel
+		{
+			Location = new Point(20, 84),
+			Size = new Size(602, 56),
+			BackColor = Color.FromArgb(248, 250, 252),
+		};
+		ApplyRoundedRegion(commandShell, 14);
+		commandShell.Paint += (_, e) => DrawRoundedBorder(e, commandShell.ClientRectangle, 14, CBorder);
+
+		var commandBox = new TextBox
+		{
+			Text = firewallCommand,
+			Multiline = true,
+			WordWrap = false,
+			ScrollBars = ScrollBars.Horizontal,
+			ReadOnly = true,
+			BorderStyle = BorderStyle.None,
+			BackColor = commandShell.BackColor,
+			ForeColor = CTextPrimary,
+			Font = new Font("Consolas", 9f),
+			Location = new Point(14, 10),
+			Size = new Size(574, 32),
+			TabStop = false,
+		};
+		commandShell.Controls.Add(commandBox);
+
+		var copyCommandButton = CreateOutlineButton("复制命令", 106, 34);
+		copyCommandButton.Location = new Point(636, 96);
+		copyCommandButton.Click += (_, _) => CopyToClipboard(firewallCommand);
+
+		var footerHint = new Label
+		{
+			Text = "提示：如果你已经看到自动放行成功的提示，这条命令通常不需要再次执行。",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 8.8f),
+			AutoSize = false,
+			Size = new Size(600, 20),
+			Location = new Point(20, 150),
+		};
+
+		commandCard.Controls.AddRange(new Control[] { commandShell, copyCommandButton, footerHint });
+
+		var closeButton = CreateFilledButton("我知道了", 120, 40);
+		closeButton.Location = new Point(628, 648);
+		closeButton.Click += (_, _) => dialog.Close();
+		dialog.AcceptButton = closeButton;
+		dialog.CancelButton = closeButton;
+
+		content.Controls.AddRange(new Control[]
+		{
+			titleLabel,
+			titleHintLabel,
+			statusCard,
+			checklistCard,
+			commandCard,
+			closeButton,
+		});
+
+		return dialog;
+	}
+
+	private static string BuildFirewallCommand(int port)
+	{
+		return $"powershell -Command \"New-NetFirewallRule -DisplayName '千私云 电脑访问 TCP {port}' -Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol TCP -LocalPort {port}\"";
 	}
 
 	private void InitializeComponent()
