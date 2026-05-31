@@ -34,6 +34,14 @@ public sealed class HostStatusForm : Form
 	private readonly DeviceIdentityService _deviceIdentity;
 	private readonly string[] _boundUrls;
 	private readonly System.Windows.Forms.Timer _refreshTimer;
+	private readonly ToolTip _helpToolTip = new ToolTip
+	{
+		AutoPopDelay = 15000,
+		InitialDelay = 250,
+		ReshowDelay = 100,
+		ShowAlways = true,
+		IsBalloon = true,
+	};
 	private IPAddress? _stableIpv6;
 	private string? _lastReportedIpv6;   // 上次成功上报到云端的地址，用于检测变化时立即同步
 	private IReadOnlyList<IPAddress> _lanIpv4;
@@ -424,11 +432,12 @@ public sealed class HostStatusForm : Form
 			TextAlign = ContentAlignment.MiddleLeft,
 		};
 
-		var copyPathButton = CreateIconButton();
-		copyPathButton.Location = new Point(462, 14);
-		copyPathButton.Click += (_, _) => CopyToClipboard(_fileBrowserManager.SharedRootPath);
+		var openPathButton = CreateIconButton();
+		openPathButton.Text = "📂";
+		openPathButton.Location = new Point(462, 14);
+		openPathButton.Click += (_, _) => OpenUrl(_fileBrowserManager.SharedRootPath);
 
-		pathBox.Controls.AddRange(new Control[] { pathLabel, copyPathButton });
+		pathBox.Controls.AddRange(new Control[] { pathLabel, openPathButton });
 		storageCard.Controls.Add(pathBox);
 
 		_storageUsageLabel = new Label
@@ -478,7 +487,11 @@ public sealed class HostStatusForm : Form
 
 		var networkCard = BuildCard(RightW, 350);
 		networkCard.Location = new Point(0, 0);
-		networkCard.Controls.Add(MakeSectionTitle("设备地址", "设备地址可能发生改变，建议登录客户端以实时同步最新地址。", 20, 20));
+		networkCard.Controls.Add(MakeSectionTitleWithHelp(
+			"设备地址",
+			"设备地址可能发生改变，建议登录客户端以实时同步最新地址。",
+			20, 20,
+			"如果在非局域网环境下无法访问本设备，可能是运营商拦截了 IPv6 入站连接。\n建议改用局域网访问。"));
 
 		int top = 92;
 		var ipv6Row = BuildAddressRow(
@@ -656,7 +669,7 @@ public sealed class HostStatusForm : Form
 		}
 		else
 		{
-			_cloudSyncStatusLabel.Text = $"地址同步失败（设备可能尚未注册）";
+			_cloudSyncStatusLabel.Text = "同步失败，用户未登录或网络异常";
 			_cloudSyncStatusLabel.ForeColor = CTextMuted;
 			// 有地址但上报失败，8s 后重试（而非 32s）
 			_syncTickCount = 6;
@@ -1088,13 +1101,19 @@ public sealed class HostStatusForm : Form
 			AutoSize = true,
 		};
 
-		var openWebMiniButton = CreateFilledButton("打开管理页", LeftW - 48, 38);
+		var openWebMiniButton = CreateFilledButton("打开管理页", (LeftW - 48 - 12) / 2, 38);
 		openWebMiniButton.Location = new Point(24, 280);
 		openWebMiniButton.Click += (_, _) => OpenUrl(_fileBrowserManager.BaseAddress.ToString());
 
+		var showQrButton = CreateOutlineButton("显示二维码", (LeftW - 48 - 12) / 2, 38);
+		showQrButton.Location = new Point(24 + (LeftW - 48 - 12) / 2 + 12, 280);
+		showQrButton.BackColor = Color.FromArgb(234, 238, 244);
+		showQrButton.Click += (_, _) => ShowAuthorizationQrDialog();
+
 		_registeredPanel.Controls.AddRange(new Control[] {
 			successBadge, regUsernameCaptionLabel, _regUsernameValueLabel,
-			regDeviceNameCaptionLabel, _regDeviceNameValueLabel, openWebMiniButton,
+			regDeviceNameCaptionLabel, _regDeviceNameValueLabel,
+			openWebMiniButton, showQrButton,
 		});
 
 		card.Controls.AddRange(new Control[] { _unregisteredPanel, _registeringPanel, _registeredPanel });
@@ -1207,6 +1226,69 @@ public sealed class HostStatusForm : Form
 		};
 
 		flow.Controls.AddRange(new Control[] { titleLabel, subtitleLabel });
+		return flow;
+	}
+
+	private Control MakeSectionTitleWithHelp(string title, string subtitle, int x, int y, string helpText)
+	{
+		var flow = new FlowLayoutPanel
+		{
+			Location = new Point(x, y),
+			FlowDirection = FlowDirection.TopDown,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			WrapContents = false,
+			BackColor = Color.Transparent,
+			Margin = new Padding(0),
+			Padding = new Padding(0),
+		};
+
+		var titleRow = new FlowLayoutPanel
+		{
+			FlowDirection = FlowDirection.LeftToRight,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			WrapContents = false,
+			BackColor = Color.Transparent,
+			Margin = new Padding(0, 0, 0, 1),
+			Padding = new Padding(0),
+		};
+
+		var titleLabel = new Label
+		{
+			Text = title,
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 15f, FontStyle.Bold),
+			AutoSize = true,
+			Margin = new Padding(0),
+		};
+
+		var helpIcon = new Label
+		{
+			Text = "?",
+			Size = new Size(20, 20),
+			TextAlign = ContentAlignment.MiddleCenter,
+			Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+			ForeColor = CAccent,
+			BackColor = CAccentSoft,
+			Margin = new Padding(8, 8, 0, 0),
+			Cursor = Cursors.Help,
+		};
+		ApplyRoundedRegion(helpIcon, 10);
+		_helpToolTip.SetToolTip(helpIcon, helpText);
+
+		titleRow.Controls.AddRange(new Control[] { titleLabel, helpIcon });
+
+		var subtitleLabel = new Label
+		{
+			Text = subtitle,
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9f),
+			AutoSize = true,
+			Margin = new Padding(0),
+		};
+
+		flow.Controls.AddRange(new Control[] { titleRow, subtitleLabel });
 		return flow;
 	}
 
@@ -1389,11 +1471,17 @@ public sealed class HostStatusForm : Form
 
 	private string CreateDeviceBindingPayload()
 	{
+		// 优先用公网 IPv6；否则回退到第二个局域网 IPv4（通常为真实物理网卡）。
+		var ip = _stableIpv6?.ToString()
+			?? _lanIpv4.ElementAtOrDefault(1)?.ToString()
+			?? _lanIpv4.ElementAtOrDefault(0)?.ToString();
+
 		return System.Text.Json.JsonSerializer.Serialize(new
 		{
 			deviceId = _deviceIdentity.DeviceId,
 			deviceName = _deviceIdentity.DeviceName,
 			secret = _deviceIdentity.DeviceSecret,
+			ip = ip,
 		});
 	}
 
@@ -1403,6 +1491,125 @@ public sealed class HostStatusForm : Form
 		using var qrData = generator.CreateQrCode(CreateDeviceBindingPayload(), QRCodeGenerator.ECCLevel.Q);
 		using var qrCode = new QRCode(qrData);
 		return qrCode.GetGraphic(8, CTextPrimary, Color.White, drawQuietZones: true);
+	}
+
+	private string CreateAuthorizationPayload()
+	{
+		var ip = _stableIpv6?.ToString()
+			?? _lanIpv4.ElementAtOrDefault(1)?.ToString()
+			?? _lanIpv4.ElementAtOrDefault(0)?.ToString();
+
+		return System.Text.Json.JsonSerializer.Serialize(new
+		{
+			type = "auth",
+			deviceId = _deviceIdentity.DeviceId,
+			deviceName = _deviceIdentity.DeviceName,
+			secret = _deviceIdentity.DeviceSecret,
+			username = _regUsername,
+			ip = ip,
+		});
+	}
+
+	private Image CreateAuthorizationQrImage()
+	{
+		using var generator = new QRCodeGenerator();
+		using var qrData = generator.CreateQrCode(CreateAuthorizationPayload(), QRCodeGenerator.ECCLevel.Q);
+		using var qrCode = new QRCode(qrData);
+		return qrCode.GetGraphic(8, CTextPrimary, Color.White, drawQuietZones: true);
+	}
+
+	private void ShowAuthorizationQrDialog()
+	{
+		using var dialog = new Form
+		{
+			Text = "授权二维码",
+			StartPosition = FormStartPosition.CenterParent,
+			ClientSize = new Size(360, 460),
+			FormBorderStyle = FormBorderStyle.FixedDialog,
+			ShowIcon = false,
+			MaximizeBox = false,
+			MinimizeBox = false,
+			BackColor = CBg,
+			Font = new Font("Segoe UI", 9f),
+		};
+
+		var titleLabel = new Label
+		{
+			Text = "扫描二维码重新授权",
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 14f, FontStyle.Bold),
+			AutoSize = false,
+			TextAlign = ContentAlignment.MiddleCenter,
+			Size = new Size(320, 28),
+			Location = new Point(20, 18),
+		};
+
+		var hintLabel = new Label
+		{
+			Text = "已绑定本设备的手机，扫描后会自动更新授权并打开登录框，无需重新注册。",
+			ForeColor = CTextMuted,
+			Font = new Font("Segoe UI", 9f),
+			AutoSize = false,
+			TextAlign = ContentAlignment.MiddleCenter,
+			Size = new Size(320, 40),
+			Location = new Point(20, 50),
+		};
+
+		var qrShell = new Panel
+		{
+			Location = new Point(80, 100),
+			Size = new Size(200, 200),
+			BackColor = Color.White,
+			Padding = new Padding(10),
+		};
+		ApplyRoundedRegion(qrShell, 22);
+		qrShell.Paint += (_, e) => DrawRoundedBorder(e, qrShell.ClientRectangle, 22, CBorder);
+
+		Image? qrImage = null;
+		try
+		{
+			qrImage = CreateAuthorizationQrImage();
+			var qrPictureBox = new PictureBox
+			{
+				Dock = DockStyle.Fill,
+				BackColor = Color.White,
+				SizeMode = PictureBoxSizeMode.Zoom,
+				Image = qrImage,
+			};
+			qrShell.Controls.Add(qrPictureBox);
+		}
+		catch
+		{
+			qrShell.Controls.Add(new Label
+			{
+				Text = "二维码生成失败",
+				Dock = DockStyle.Fill,
+				TextAlign = ContentAlignment.MiddleCenter,
+				ForeColor = CDanger,
+			});
+		}
+
+		var accountLabel = new Label
+		{
+			Text = string.IsNullOrEmpty(_regUsername) ? "当前账号：—" : $"当前账号：{_regUsername}",
+			ForeColor = CTextPrimary,
+			Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+			AutoSize = false,
+			TextAlign = ContentAlignment.MiddleCenter,
+			Size = new Size(320, 24),
+			Location = new Point(20, 314),
+		};
+
+		var closeButton = CreateFilledButton("关闭", 120, 38);
+		closeButton.Location = new Point(120, 360);
+		closeButton.Click += (_, _) => dialog.Close();
+		dialog.AcceptButton = closeButton;
+		dialog.CancelButton = closeButton;
+
+		dialog.Controls.AddRange(new Control[] { titleLabel, hintLabel, qrShell, accountLabel, closeButton });
+		dialog.ShowDialog(this);
+
+		qrImage?.Dispose();
 	}
 
 	private static Button CreateOutlineButton(string text, int width, int height)
