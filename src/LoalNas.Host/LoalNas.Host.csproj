@@ -5,6 +5,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\qiansiyun.ico</ApplicationIcon>
+    <AssemblyTitle>千私云</AssemblyTitle>
+    <Product>千私云</Product>
   </PropertyGroup>
 
   <ItemGroup>

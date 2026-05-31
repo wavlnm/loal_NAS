@@ -305,6 +305,11 @@ public sealed class HostStatusForm : Form
 	private void InitializeComponent()
 	{
 		Text = "千私云";
+		var appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+		if (appIcon is not null)
+		{
+			Icon = appIcon;
+		}
 		StartPosition = FormStartPosition.CenterScreen;
 		ClientSize = new Size(1230, 770);
 		MinimumSize = new Size(1230, 770);
