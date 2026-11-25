@@ -260,21 +260,21 @@ internal static class Program
             });
         });
 
-        app.MapGet("/api/device/qr.png", (HttpContext context, DeviceIdentityService identity) =>
+        app.MapGet("/api/device/qr.png", (HttpContext context, DeviceIdentityService identity, IConfiguration config) =>
         {
             if (!IsLoopback(context))
             {
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             }
 
-            var payload = BuildBindingPayload(identity);
+            var payload = BuildBindingPayload(identity, config);
             var png = QrService.CreatePng(payload);
             return Results.File(png, "image/png");
         });
 
-        app.MapGet("/api/device/payload", (HttpContext context, DeviceIdentityService identity) =>
+        app.MapGet("/api/device/payload", (HttpContext context, DeviceIdentityService identity, IConfiguration config) =>
             IsLoopback(context)
-                ? Results.Content(BuildBindingPayload(identity), "application/json; charset=utf-8")
+                ? Results.Content(BuildBindingPayload(identity, config), "application/json; charset=utf-8")
                 : Results.StatusCode(StatusCodes.Status403Forbidden));
     }
 
@@ -297,19 +297,28 @@ internal static class Program
         }
     };
 
-    /// <summary>二维码内容：设备 ID、名称、secret、可达地址。与原 Windows 端绑定载荷一致。</summary>
-    private static string BuildBindingPayload(DeviceIdentityService identity)
+    /// <summary>二维码内容：设备 ID、名称、secret、可达地址（局域网优先，附带可选公网入口）。</summary>
+    private static string BuildBindingPayload(DeviceIdentityService identity, IConfiguration config)
     {
-        var ip = NetworkInfoService.GetStablePublicIpv6()?.ToString()
-            ?? NetworkInfoService.GetLanIpv4Addresses().FirstOrDefault()?.ToString();
-
-        return System.Text.Json.JsonSerializer.Serialize(new
+        var lan = NetworkInfoService.GetLanIpv4Addresses().FirstOrDefault()?.ToString();
+        var ipv6 = NetworkInfoService.GetStablePublicIpv6()?.ToString();
+        var publicBase = config["LoalNas:Host:PublicBaseUrl"]?.Trim();
+        if (string.IsNullOrWhiteSpace(publicBase))
         {
-            deviceId = identity.DeviceId,
-            deviceName = identity.DeviceName,
-            secret = identity.DeviceSecret,
-            ip
-        });
+            publicBase = null;
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["deviceId"] = identity.DeviceId,
+            ["deviceName"] = identity.DeviceName,
+            ["secret"] = identity.DeviceSecret,
+            ["ip"] = lan ?? ipv6,
+            ["lan"] = lan,
+            ["public"] = publicBase
+        };
+
+        return System.Text.Json.JsonSerializer.Serialize(payload);
     }
 
     private static bool IsLoopback(HttpContext context)
