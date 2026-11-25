@@ -29,6 +29,20 @@ public sealed class MediaRelayService(
 		"Accept-Encoding"
 	};
 
+	// FileBrowser 会在响应上加安全头，转发到视频流会干扰浏览器/系统播放器内置播放，剥掉
+	private static readonly HashSet<string> ResponseHeadersToDrop = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"Content-Security-Policy",
+		"Content-Security-Policy-Report-Only",
+		"X-Content-Type-Options",
+		"X-Frame-Options",
+		"Cross-Origin-Resource-Policy",
+		"Cross-Origin-Embedder-Policy",
+		"Cross-Origin-Opener-Policy",
+		"Report-To",
+		"NEL",
+	};
+
 	private readonly ConcurrentDictionary<string, MediaRelayTicket> tickets = new();
 
 	public MediaRelayTicketLease CreateTicket(string authToken, string resourcePath)
@@ -53,6 +67,7 @@ public sealed class MediaRelayService(
 
 		if (!tickets.TryGetValue(ticketId, out var ticket))
 		{
+			logger.LogWarning("媒体票据不存在（可能服务重启或已过期被清理）：{TicketId}", ticketId);
 			context.Response.StatusCode = (int)HttpStatusCode.NotFound;
 			await context.Response.WriteAsJsonAsync(new
 			{
@@ -64,6 +79,7 @@ public sealed class MediaRelayService(
 		if (ticket.ExpiresAt <= DateTimeOffset.UtcNow)
 		{
 			tickets.TryRemove(ticketId, out _);
+			logger.LogWarning("媒体票据已过期：{TicketId}", ticketId);
 			context.Response.StatusCode = (int)HttpStatusCode.Gone;
 			await context.Response.WriteAsJsonAsync(new
 			{
@@ -171,11 +187,19 @@ public sealed class MediaRelayService(
 
 		foreach (var header in responseMessage.Headers)
 		{
+			if (HopByHopHeaders.Contains(header.Key) || ResponseHeadersToDrop.Contains(header.Key))
+			{
+				continue;
+			}
 			context.Response.Headers[header.Key] = header.Value.ToArray();
 		}
 
 		foreach (var header in responseMessage.Content.Headers)
 		{
+			if (ResponseHeadersToDrop.Contains(header.Key))
+			{
+				continue;
+			}
 			context.Response.Headers[header.Key] = header.Value.ToArray();
 		}
 

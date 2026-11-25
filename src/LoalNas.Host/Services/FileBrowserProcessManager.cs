@@ -52,6 +52,22 @@ public sealed class FileBrowserProcessManager(
                 throw new FileNotFoundException($"FileBrowser executable was not found: {executablePath}");
             }
 
+            // Linux 下发布/拷贝可能丢失可执行位，启动前补上
+            if (OperatingSystem.IsLinux())
+            {
+                try
+                {
+                    File.SetUnixFileMode(executablePath,
+                        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                        UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                        UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                }
+                catch
+                {
+                    // 忽略，后续 Process.Start 若失败会抛出
+                }
+            }
+
             logger.LogInformation("Starting FileBrowser. Root: {RootDirectory}; Database: {DatabasePath}", rootDirectory, databasePath);
 
             var process = new Process

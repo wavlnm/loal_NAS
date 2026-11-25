@@ -1,429 +1,556 @@
 using System.Net;
 using LoalNas.Host.Configuration;
-using LoalNas.Host.Forms;
 using LoalNas.Host.Services;
-using Microsoft.Extensions.Hosting;
-using System.Windows.Forms;
 
 namespace LoalNas.Host;
 
 internal static class Program
 {
-	[STAThread]
-	private static void Main(string[] args)
-	{
-		// 将 Console 输出重定向到日志文件（按日期滚动，最多保留 7 天）
-		RedirectConsoleToFile();
+    private static async Task Main(string[] args)
+    {
+        var app = BuildApplication(args);
 
-		var app = BuildApplication(args);
-		var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("LoalNas.Host.Startup");
-		var firewallEnsurer = app.Services.GetRequiredService<WindowsFirewallRuleEnsurer>();
-		var fileBrowserManager = app.Services.GetRequiredService<FileBrowserProcessManager>();
-		var appLifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
-		var deviceTracker = app.Services.GetRequiredService<ConnectedDeviceTracker>();
-		var deviceIdentity = app.Services.GetRequiredService<DeviceIdentityService>();
+        await app.StartAsync();
 
-		// Start web host on a background thread so the main thread stays STA for WinForms/Clipboard
-		Exception? hostStartError = null;
-		string[]? boundUrls = null;
-		var hostReady = new System.Threading.ManualResetEventSlim(false);
+        var boundUrls = app.Urls.ToArray();
+        var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("LoalNas.Host.Startup");
+        var firewall = app.Services.GetRequiredService<LinuxFirewallEnsurer>();
 
-		var hostThread = Task.Run(async () =>
-		{
-			try
-			{
-				await app.StartAsync();
-				boundUrls = app.Urls.ToArray();
-				hostReady.Set();
-				await app.WaitForShutdownAsync();
-			}
-			catch (Exception ex)
-			{
-				hostStartError = ex;
-				hostReady.Set();
-			}
-		});
+        Ipv6EndpointReporter.LogAvailableAddresses(logger, boundUrls);
+        _ = firewall.EnsureRulesForUrlsAsync(boundUrls);
 
-		hostReady.Wait();
+        var port = GetBoundPort(boundUrls);
+        logger.LogInformation("千私云已启动。本地配对面板： http://127.0.0.1:{Port}/admin", port);
+        logger.LogInformation("对外服务地址： http://[::]:{Port}（手机/局域网设备访问）", port);
 
-		if (hostStartError != null)
-			throw new InvalidOperationException("Web host failed to start.", hostStartError);
+        await app.WaitForShutdownAsync();
+    }
 
-		Ipv6EndpointReporter.LogAvailableAddresses(startupLogger, boundUrls!);
-		_ = firewallEnsurer.EnsureRulesForUrlsAsync(boundUrls!);
+    private static WebApplication BuildApplication(string[] args)
+    {
+        var builder = WebApplication.CreateBuilder(args);
 
-		ApplicationConfiguration.Initialize();
-		using var form = new HostStatusForm(fileBrowserManager, appLifetime, deviceTracker, deviceIdentity, boundUrls!);
-		Application.Run(form);
+        var hostOptions = builder.Configuration
+            .GetSection(PublicHostOptions.SectionName)
+            .Get<PublicHostOptions>() ?? new PublicHostOptions();
 
-		app.StopAsync().GetAwaiter().GetResult();
-		app.DisposeAsync().GetAwaiter().GetResult();
-	}
+        builder.WebHost.UseUrls(hostOptions.Url);
 
- 	private static WebApplication BuildApplication(string[] args)
-	{
-		var builder = WebApplication.CreateBuilder(args);
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.Limits.MaxRequestBodySize = 2 * 1024 * 1024 * 1024L;
+            options.Limits.MaxRequestLineSize = 4 * 1024;
+            options.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
+            options.Limits.MaxConcurrentConnections = 200;
+            options.Limits.MaxConcurrentUpgradedConnections = 50;
+            options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
+            options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(60);
+        });
 
- 		var hostOptions = builder.Configuration
-			.GetSection(PublicHostOptions.SectionName)
-			.Get<PublicHostOptions>() ?? new PublicHostOptions();
+        builder.Services.Configure<PublicHostOptions>(builder.Configuration.GetSection(PublicHostOptions.SectionName));
+        builder.Services.Configure<FirewallOptions>(builder.Configuration.GetSection(FirewallOptions.SectionName));
+        builder.Services.Configure<TrashOptions>(builder.Configuration.GetSection(TrashOptions.SectionName));
+        builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
 
- 		builder.WebHost.UseUrls(hostOptions.Url);
+        builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
+        {
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.None
+        });
 
- 		builder.WebHost.ConfigureKestrel(options =>
-		{
-			// 默认请求体上限 500 MB（文件上传场景）；可按路由再单独放宽
-			options.Limits.MaxRequestBodySize = 2 * 1024 * 1024 * 1024L;
-			// 请求行（URL + 方法）最大 4 KB，防超长 URL 攻击
-			options.Limits.MaxRequestLineSize = 4 * 1024;
-			// 所有请求头合计最大 16 KB
-			options.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
-			// 并发连接上限：防止大量空连接耗尽资源（Slowloris 等）
-			options.Limits.MaxConcurrentConnections = 200;
-			options.Limits.MaxConcurrentUpgradedConnections = 50; // WebSocket 等升级连接
-			// 慢速攻击防护：请求头必须在 10 s 内发完，Keep-Alive 空闲 60 s 后断开
-			options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
-			options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(60);
-		});
+        builder.Services.AddHttpClient(MediaRelayService.HttpClientName, client =>
+        {
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.None
+        });
 
- 		builder.Services.Configure<PublicHostOptions>(
-			builder.Configuration.GetSection(PublicHostOptions.SectionName));
+        builder.Services.AddSingleton<FileBrowserProcessManager>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<FileBrowserProcessManager>());
+        builder.Services.AddSingleton<FileBrowserApiProxy>();
+        builder.Services.AddSingleton<MediaRelayService>();
+        builder.Services.AddSingleton<LinuxFirewallEnsurer>();
+        builder.Services.AddSingleton<ConnectedDeviceTracker>();
+        builder.Services.AddSingleton<DeviceIdentityService>();
+        builder.Services.AddSingleton<TrashService>();
+        builder.Services.AddHostedService<TrashCleanupService>();
 
- 		builder.Services.Configure<FirewallOptions>(
-			builder.Configuration.GetSection(FirewallOptions.SectionName));
+        var app = builder.Build();
+        app.UseMiddleware<IpRateLimitMiddleware>();
+        app.UseMiddleware<PhoneAuthMiddleware>();
+        MapEndpoints(app);
+        return app;
+    }
 
- 		builder.Services.Configure<FileBrowserOptions>(
-			builder.Configuration.GetSection(FileBrowserOptions.SectionName));
+    private static void MapEndpoints(WebApplication app)
+    {
+        app.MapGet("/", (FileBrowserProcessManager manager) => Results.Ok(BuildStatusPayload(manager)));
 
- 		builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
-		{
-			client.Timeout = Timeout.InfiniteTimeSpan;
-		}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-		{
-			AllowAutoRedirect = false,
-			UseCookies = false,
-			AutomaticDecompression = DecompressionMethods.None
-		});
-		// 媒体中转专用 HttpClient：禁用自动解压，保证 Content-Length/Content-Encoding
-		// 原样透传给浏览器，浏览器才能正确 Range seek 流式播放。
-		builder.Services.AddHttpClient(MediaRelayService.HttpClientName, client =>
-		{
-			client.Timeout = Timeout.InfiniteTimeSpan;
-		}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-		{
-			AllowAutoRedirect = false,
-			UseCookies = false,
-			AutomaticDecompression = DecompressionMethods.None
-		});
- 		builder.Services.AddSingleton<FileBrowserProcessManager>();
-		builder.Services.AddHostedService(services => services.GetRequiredService<FileBrowserProcessManager>());
-		builder.Services.AddSingleton<FileBrowserApiProxy>();
-		builder.Services.AddSingleton<MediaRelayService>();
-		builder.Services.AddSingleton<WindowsFirewallRuleEnsurer>();
-		builder.Services.AddSingleton<ConnectedDeviceTracker>();
-		builder.Services.AddSingleton<DeviceIdentityService>();
+        app.MapGet("/api/system/status", (FileBrowserProcessManager manager) => Results.Ok(BuildStatusPayload(manager)));
 
-		var app = builder.Build();
-		// IP 限流 + 自动封禁（需在路由匹配之前执行）
-		app.UseMiddleware<LoalNas.Host.Services.IpRateLimitMiddleware>();
-		// 手机端访问鉴权（基于扫码分发的 secret + 时间戳 + nonce）
-		app.UseMiddleware<LoalNas.Host.Services.PhoneAuthMiddleware>();
-		MapEndpoints(app);
-		return app;
-	}
+        app.MapPost("/api/system/media-tickets",
+            (HttpContext context, CreateMediaRelayTicketRequest request, MediaRelayService relay) =>
+            {
+                var authToken = context.Request.Headers["X-Auth"].ToString().Trim();
+                if (string.IsNullOrEmpty(authToken))
+                {
+                    return Results.Unauthorized();
+                }
 
-	private static void MapEndpoints(WebApplication app)
-	{
-		app.MapGet("/", (FileBrowserProcessManager manager) =>
-		{
-			var storage = TryCreateStorageSnapshot(manager.SharedRootPath);
-			return Results.Ok(new
-			{
-				name = "千私云电脑",
-				fileBrowser = new
-				{
-					running = manager.IsRunning,
-					baseUrl = manager.BaseAddress.ToString(),
-					sharedRoot = manager.SharedRootPath
-				},
-				storage,
-				endpoints = new
-				{
-					status = "/api/system/status",
-					fileBrowserApi = "/api/filebrowser/{...}",
-					mediaTicket = "/api/system/media-tickets"
-				}
-			});
-		});
+                try
+                {
+                    var ticket = relay.CreateTicket(authToken, request.Path);
+                    // 携带真实文件名/扩展名，厂商浏览器会按扩展名识别为可播放媒体
+                    var fileName = Path.GetFileName(request.Path);
+                    var safeName = string.IsNullOrWhiteSpace(fileName) ? "media" : Uri.EscapeDataString(fileName);
+                    var url = $"{context.Request.Scheme}://{context.Request.Host}/api/system/media-open/{ticket.TicketId}/{safeName}";
+                    return Results.Ok(new { url, expiresAt = ticket.ExpiresAt });
+                }
+                catch (ArgumentException exception)
+                {
+                    return Results.BadRequest(new { error = "invalid_media_ticket_request", detail = exception.Message });
+                }
+            });
 
-		app.MapGet("/api/system/status", (FileBrowserProcessManager manager) =>
-		{
-			var storage = TryCreateStorageSnapshot(manager.SharedRootPath);
-			return Results.Ok(new
-			{
-				name = "千私云电脑",
-				fileBrowser = new
-				{
-					running = manager.IsRunning,
-					baseUrl = manager.BaseAddress.ToString(),
-					sharedRoot = manager.SharedRootPath
-				},
-				storage,
-				fileBrowserRunning = manager.IsRunning,
-				fileBrowserBaseUrl = manager.BaseAddress.ToString(),
-				sharedRootPath = manager.SharedRootPath
-			});
-		});
+        app.MapMethods("/api/system/media-open/{ticketId}", new[] { HttpMethods.Get, HttpMethods.Head },
+            (HttpContext context, string ticketId, MediaRelayService relay) => relay.ProxyMediaAsync(context, ticketId));
 
-		app.MapPost("/api/system/media-tickets",
-			(HttpContext context, CreateMediaRelayTicketRequest request, MediaRelayService relay) =>
-			{
-				var authToken = context.Request.Headers["X-Auth"].ToString().Trim();
-				if (string.IsNullOrEmpty(authToken))
-				{
-					return Results.Unauthorized();
-				}
+        // 带文件名的形式：/api/system/media-open/{ticketId}/{fileName}
+        app.MapMethods("/api/system/media-open/{ticketId}/{**fileName}", new[] { HttpMethods.Get, HttpMethods.Head },
+            (HttpContext context, string ticketId, string? fileName, MediaRelayService relay) => relay.ProxyMediaAsync(context, ticketId));
 
-				try
-				{
-					var ticket = relay.CreateTicket(authToken, request.Path);
-					var url = $"{context.Request.Scheme}://{context.Request.Host}/api/system/media-open/{ticket.TicketId}";
-					return Results.Ok(new
-					{
-						url,
-						expiresAt = ticket.ExpiresAt
-					});
-				}
-				catch (ArgumentException exception)
-				{
-					return Results.BadRequest(new
-					{
-						error = "invalid_media_ticket_request",
-						detail = exception.Message
-					});
-				}
-			});
+        // ── 回收站 ─────────────────────────────────────────────────────────────
+        app.MapGet("/api/trash", (TrashService trash) => Results.Ok(new { items = trash.List() }));
 
-		app.MapMethods("/api/system/media-open/{ticketId}", new[]
-		{
-			HttpMethods.Get,
-			HttpMethods.Head
-		}, (HttpContext context, string ticketId, MediaRelayService relay) => relay.ProxyMediaAsync(context, ticketId));
+        app.MapPost("/api/trash/restore", async (HttpContext context, TrashService trash) =>
+        {
+            string body;
+            using (var reader = new StreamReader(context.Request.Body))
+            {
+                body = await reader.ReadToEndAsync();
+            }
 
-		var proxyMethods = new[]
-		{
-			HttpMethods.Get,
-			HttpMethods.Post,
-			HttpMethods.Put,
-			HttpMethods.Patch,
-			HttpMethods.Delete,
-			HttpMethods.Head,
-			HttpMethods.Options
-		};
+            TrashRestoreRequest? request = null;
+            try
+            {
+                request = System.Text.Json.JsonSerializer.Deserialize<TrashRestoreRequest>(
+                    body,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch
+            {
+                // 按无效请求处理
+            }
 
-		app.MapMethods("/api/filebrowser", proxyMethods,
-			(HttpContext context, FileBrowserProcessManager manager, FileBrowserApiProxy proxy, ILoggerFactory loggerFactory) =>
-			{
-				if (HttpMethods.IsPost(context.Request.Method) &&
-				    CheckDiskSpaceInsufficient(context, manager.SharedRootPath, loggerFactory, out var diskError))
-				{
-					return diskError!;
-				}
-				return proxy.ProxyApiAsync(context, string.Empty);
-			});
-		app.MapMethods("/api/filebrowser/{**path}", proxyMethods,
-			(HttpContext context, string path, FileBrowserProcessManager manager, FileBrowserApiProxy proxy, ILoggerFactory loggerFactory) =>
-			{
-				if (HttpMethods.IsPost(context.Request.Method) &&
-				    CheckDiskSpaceInsufficient(context, manager.SharedRootPath, loggerFactory, out var diskError))
-				{
-					return diskError!;
-				}
-				return proxy.ProxyApiAsync(context, path);
-			});
-	}
+            if (request is null || string.IsNullOrWhiteSpace(request.Id))
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(new { error = "invalid_request" });
+                return;
+            }
 
-	/// <summary>
-	/// 检查磁盘剩余空间是否足以容纳本次上传。
-	/// 要求：可用空间 > 上传大小 + 100 MB 盈余。
-	/// </summary>
-	/// <returns>true 表示空间不足，diskError 已填充；false 表示空间充足。</returns>
-	private static bool CheckDiskSpaceInsufficient(
-		HttpContext context,
-		string sharedRootPath,
-		ILoggerFactory loggerFactory,
-		out Task<IResult>? diskError)
-	{
-		diskError = null;
-		var logger = loggerFactory.CreateLogger("DiskSpaceCheck");
-		var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-		var path = context.Request.Path;
+            var status = trash.Restore(request.Id, out var error);
+            context.Response.StatusCode = status switch
+            {
+                TrashService.TrashStatus.Ok => StatusCodes.Status200OK,
+                TrashService.TrashStatus.NotFound => StatusCodes.Status404NotFound,
+                TrashService.TrashStatus.Conflict => StatusCodes.Status409Conflict,
+                TrashService.TrashStatus.Invalid => StatusCodes.Status400BadRequest,
+                _ => StatusCodes.Status500InternalServerError,
+            };
+            await context.Response.WriteAsJsonAsync(new { ok = status == TrashService.TrashStatus.Ok, error });
+        });
 
-		var contentLength = context.Request.ContentLength;
-		if (contentLength is null or <= 0)
-		{
-			logger.LogInformation(
-				"Upload request from {Ip} to {Path} has no Content-Length; bypassing disk check and forwarding to FileBrowser.",
-				ip, path);
-			return false;
-		}
+        app.MapDelete("/api/trash/{id}", (string id, TrashService trash) =>
+            trash.Purge(id) == TrashService.TrashStatus.Ok
+                ? Results.NoContent()
+                : Results.NotFound(new { error = "not_found" }));
 
-		const long surplusBytes = 100 * 1024 * 1024L; // 100 MB 盈余
-		try
-		{
-			var driveRoot = Path.GetPathRoot(Path.GetFullPath(sharedRootPath));
-			if (string.IsNullOrWhiteSpace(driveRoot))
-			{
-				logger.LogWarning(
-					"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): could not resolve drive root from shared path '{SharedPath}'; bypassing disk check.",
-					ip, path, contentLength.Value / (1024.0 * 1024), sharedRootPath);
-				return false;
-			}
+        app.MapDelete("/api/trash", (TrashService trash) => Results.Ok(new { removed = trash.Empty() }));
 
-			var drive = new DriveInfo(driveRoot);
-			if (!drive.IsReady)
-			{
-				logger.LogWarning(
-					"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): drive '{Drive}' is not ready; bypassing disk check.",
-					ip, path, contentLength.Value / (1024.0 * 1024), driveRoot);
-				return false;
-			}
+        var proxyMethods = new[]
+        {
+            HttpMethods.Get, HttpMethods.Post, HttpMethods.Put, HttpMethods.Patch,
+            HttpMethods.Delete, HttpMethods.Head, HttpMethods.Options
+        };
 
-			var available = drive.AvailableFreeSpace;
-			if (available >= contentLength + surplusBytes)
-			{
-				logger.LogDebug(
-					"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): disk check passed (available {AvailMb:F0} MB).",
-					ip, path, contentLength.Value / (1024.0 * 1024), available / (1024.0 * 1024));
-				return false;
-			}
+        app.MapMethods("/api/filebrowser", proxyMethods,
+            (HttpContext context, FileBrowserProcessManager manager, FileBrowserApiProxy proxy, ILoggerFactory loggerFactory) =>
+            {
+                if (HttpMethods.IsPost(context.Request.Method) &&
+                    CheckDiskSpaceInsufficient(context, manager.SharedRootPath, loggerFactory, out var diskError))
+                {
+                    return diskError!;
+                }
+                return proxy.ProxyApiAsync(context, string.Empty);
+            });
 
-			var availableMb = available / (1024.0 * 1024);
-			var requiredMb = (contentLength.Value + surplusBytes) / (1024.0 * 1024);
-			logger.LogWarning(
-				"Upload rejected for {Ip} to {Path}: insufficient disk space. File {SizeMb:F1} MB, available {AvailMb:F0} MB, required {ReqMb:F0} MB (incl. 100 MB surplus).",
-				ip, path, contentLength.Value / (1024.0 * 1024), availableMb, requiredMb);
+        app.MapMethods("/api/filebrowser/{**path}", proxyMethods,
+            async (HttpContext context, string path, FileBrowserProcessManager manager, FileBrowserApiProxy proxy, ILoggerFactory loggerFactory, TrashService trash) =>
+            {
+                // 删除改为移入回收站（仅针对 resources 下的具体资源，根目录不处理）
+                if (HttpMethods.IsDelete(context.Request.Method) &&
+                    path.StartsWith("resources", StringComparison.OrdinalIgnoreCase))
+                {
+                    var resourcePath = path["resources".Length..];
+                    if (!string.IsNullOrWhiteSpace(resourcePath) && resourcePath != "/")
+                    {
+                        var status = trash.MoveToTrash(resourcePath, out var entry);
+                        if (status == TrashService.TrashStatus.Ok)
+                        {
+                            await context.Response.WriteAsJsonAsync(new { trashed = true, id = entry!.Id });
+                            return;
+                        }
 
-			diskError = Task.FromResult(Results.Json(
-				new
-				{
-					error = "insufficient_disk_space",
-					detail = $"磁盘剩余空间不足。可用 {availableMb:F0} MB，需要至少 {requiredMb:F0} MB（含 100 MB 盈余）。",
-					availableBytes = available,
-					requiredBytes = contentLength.Value + surplusBytes
-				},
-				statusCode: StatusCodes.Status507InsufficientStorage));
-			return true;
-		}
-		catch (Exception ex)
-		{
-			logger.LogWarning(ex,
-				"Upload request from {Ip} to {Path} ({SizeMb:F1} MB): disk space check threw an exception; bypassing and forwarding to FileBrowser.",
-				ip, path, contentLength.Value / (1024.0 * 1024));
-			return false;
-		}
-	}
+                        context.Response.StatusCode = status switch
+                        {
+                            TrashService.TrashStatus.NotFound => StatusCodes.Status404NotFound,
+                            TrashService.TrashStatus.Invalid => StatusCodes.Status400BadRequest,
+                            _ => StatusCodes.Status500InternalServerError,
+                        };
+                        await context.Response.WriteAsJsonAsync(new { error = status.ToString().ToLowerInvariant() });
+                        return;
+                    }
+                }
 
-	/// <summary>
-	/// 将 Console.Out / Console.Error 重定向到按日期滚动的日志文件。
-	/// 日志目录：当前工作目录下的 logs/，文件名格式 host-yyyy-MM-dd.log。
-	/// 保留最近 7 天，启动时自动清理更早的文件。
-	/// </summary>
-	private static void RedirectConsoleToFile()
-	{
-		try
-		{
-			// 使用可执行文件所在目录，安装包安装后为安装目录，开发时为 bin/Debug/net8.0/
-			var logsDir = Path.Combine(AppContext.BaseDirectory, "logs");
-			Directory.CreateDirectory(logsDir);
+                if (HttpMethods.IsPost(context.Request.Method) &&
+                    CheckDiskSpaceInsufficient(context, manager.SharedRootPath, loggerFactory, out var diskError))
+                {
+                    var result = await diskError!;
+                    await result.ExecuteAsync(context);
+                    return;
+                }
 
-			// 清理 7 天前的旧日志
-			var cutoff = DateTime.UtcNow.AddDays(-7);
-			foreach (var old in Directory.EnumerateFiles(logsDir, "host-*.log"))
-			{
-				try
-				{
-					if (File.GetLastWriteTimeUtc(old) < cutoff)
-						File.Delete(old);
-				}
-				catch { /* 删除失败不阻断启动 */ }
-			}
+                await proxy.ProxyApiAsync(context, path);
+            });
 
-			var logFile = Path.Combine(logsDir, $"host-{DateTime.Now:yyyy-MM-dd}.log");
-			var writer = new StreamWriter(logFile, append: true, System.Text.Encoding.UTF8) { AutoFlush = true };
+        // ── 本地回环面板：展示配对二维码，完成密钥传递 ──────────────────────────
+        app.MapGet("/admin", (HttpContext context) =>
+            IsLoopback(context)
+                ? Results.Content(AdminHtml, "text/html; charset=utf-8")
+                : Results.StatusCode(StatusCodes.Status403Forbidden));
 
-			// 同时保留控制台输出（如果有控制台窗口的话）
-			var multi = new MultiTextWriter(Console.Out, writer);
-			Console.SetOut(multi);
-			Console.SetError(multi);
+        app.MapGet("/api/device/info", (HttpContext context, FileBrowserProcessManager manager, DeviceIdentityService identity) =>
+        {
+            if (!IsLoopback(context))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
 
-			// 打印日志文件路径，方便定位
-			Console.WriteLine($"[LoalNas] Log file: {logFile}");
-		}
-		catch { /* 重定向失败时静默，不影响主流程 */ }
-	}
+            var ipv6 = NetworkInfoService.GetStablePublicIpv6()?.ToString();
+            var lanIpv4 = NetworkInfoService.GetLanIpv4Addresses().Select(a => a.ToString()).ToArray();
+            return Results.Ok(new
+            {
+                deviceName = identity.DeviceName,
+                deviceId = identity.DeviceId,
+                addresses = new { ipv6, lanIpv4 },
+                fileBrowser = new
+                {
+                    running = manager.IsRunning,
+                    sharedRoot = manager.SharedRootPath
+                },
+                storage = TryCreateStorageSnapshot(manager.SharedRootPath)
+            });
+        });
 
-	/// <summary>将写操作同时转发给多个 TextWriter。</summary>
-	private sealed class MultiTextWriter(params TextWriter[] writers) : TextWriter
-	{
-		public override System.Text.Encoding Encoding => writers[0].Encoding;
+        app.MapGet("/api/device/qr.png", (HttpContext context, DeviceIdentityService identity) =>
+        {
+            if (!IsLoopback(context))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
 
-		public override void Write(char value)
-		{
-			foreach (var w in writers) w.Write(value);
-		}
+            var payload = BuildBindingPayload(identity);
+            var png = QrService.CreatePng(payload);
+            return Results.File(png, "image/png");
+        });
 
-		public override void Write(string? value)
-		{
-			foreach (var w in writers) w.Write(value);
-		}
+        app.MapGet("/api/device/payload", (HttpContext context, DeviceIdentityService identity) =>
+            IsLoopback(context)
+                ? Results.Content(BuildBindingPayload(identity), "application/json; charset=utf-8")
+                : Results.StatusCode(StatusCodes.Status403Forbidden));
+    }
 
-		public override void WriteLine(string? value)
-		{
-			foreach (var w in writers) w.WriteLine(value);
-		}
+    private static object BuildStatusPayload(FileBrowserProcessManager manager) => new
+    {
+        name = "千私云",
+        fileBrowser = new
+        {
+            running = manager.IsRunning,
+            baseUrl = manager.BaseAddress.ToString(),
+            sharedRoot = manager.SharedRootPath
+        },
+        storage = TryCreateStorageSnapshot(manager.SharedRootPath),
+        endpoints = new
+        {
+            status = "/api/system/status",
+            fileBrowserApi = "/api/filebrowser/{...}",
+            mediaTicket = "/api/system/media-tickets",
+            admin = "/admin（仅本机）"
+        }
+    };
 
-		public override void Flush()
-		{
-			foreach (var w in writers) w.Flush();
-		}
+    /// <summary>二维码内容：设备 ID、名称、secret、可达地址。与原 Windows 端绑定载荷一致。</summary>
+    private static string BuildBindingPayload(DeviceIdentityService identity)
+    {
+        var ip = NetworkInfoService.GetStablePublicIpv6()?.ToString()
+            ?? NetworkInfoService.GetLanIpv4Addresses().FirstOrDefault()?.ToString();
 
-		protected override void Dispose(bool disposing)
-		{
-			if (disposing)
-				foreach (var w in writers) w.Dispose();
-			base.Dispose(disposing);
-		}
-	}
+        return System.Text.Json.JsonSerializer.Serialize(new
+        {
+            deviceId = identity.DeviceId,
+            deviceName = identity.DeviceName,
+            secret = identity.DeviceSecret,
+            ip
+        });
+    }
 
-	private static StorageSnapshot? TryCreateStorageSnapshot(string sharedRootPath)
-	{
-		try
-		{
-			var fullPath = Path.GetFullPath(sharedRootPath);
-			var driveRoot = Path.GetPathRoot(fullPath);
-			if (string.IsNullOrWhiteSpace(driveRoot))
-			{
-				return null;
-			}
+    private static bool IsLoopback(HttpContext context)
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        if (remote is null)
+        {
+            return false;
+        }
 
-			var driveInfo = new DriveInfo(driveRoot);
-			if (!driveInfo.IsReady)
-			{
-				return null;
-			}
+        if (IPAddress.IsLoopback(remote))
+        {
+            return true;
+        }
 
-			var totalBytes = driveInfo.TotalSize;
-			var freeBytes = driveInfo.TotalFreeSpace;
-			var usedBytes = totalBytes - freeBytes;
-			return new StorageSnapshot(driveInfo.Name, totalBytes, usedBytes, freeBytes);
-		}
-		catch
-		{
-			return null;
-		}
-	}
+        // IPv4-mapped IPv6 (::ffff:127.0.0.1)
+        return remote.IsIPv4MappedToIPv6 && IPAddress.IsLoopback(remote.MapToIPv4());
+    }
+
+    private static int GetBoundPort(string[] boundUrls)
+    {
+        foreach (var url in boundUrls)
+        {
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            {
+                return uri.Port;
+            }
+        }
+
+        return 5034;
+    }
+
+    private static bool CheckDiskSpaceInsufficient(
+        HttpContext context,
+        string sharedRootPath,
+        ILoggerFactory loggerFactory,
+        out Task<IResult>? diskError)
+    {
+        diskError = null;
+        var logger = loggerFactory.CreateLogger("DiskSpaceCheck");
+        var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var path = context.Request.Path;
+
+        var contentLength = context.Request.ContentLength;
+        if (contentLength is null or <= 0)
+        {
+            return false;
+        }
+
+        const long surplusBytes = 100 * 1024 * 1024L;
+        try
+        {
+            var drive = ResolveDrive(sharedRootPath);
+            if (drive is null || !drive.IsReady)
+            {
+                return false;
+            }
+
+            var available = drive.AvailableFreeSpace;
+            if (available >= contentLength + surplusBytes)
+            {
+                return false;
+            }
+
+            var availableMb = available / (1024.0 * 1024);
+            var requiredMb = (contentLength.Value + surplusBytes) / (1024.0 * 1024);
+            logger.LogWarning(
+                "Upload rejected for {Ip} to {Path}: insufficient disk space. File {SizeMb:F1} MB, available {AvailMb:F0} MB, required {ReqMb:F0} MB.",
+                ip, path, contentLength.Value / (1024.0 * 1024), availableMb, requiredMb);
+
+            diskError = Task.FromResult(Results.Json(
+                new
+                {
+                    error = "insufficient_disk_space",
+                    detail = $"磁盘剩余空间不足。可用 {availableMb:F0} MB，需要至少 {requiredMb:F0} MB（含 100 MB 盈余）。",
+                    availableBytes = available,
+                    requiredBytes = contentLength.Value + surplusBytes
+                },
+                statusCode: StatusCodes.Status507InsufficientStorage));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Disk space check failed for {Ip} to {Path}; bypassing.", ip, path);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Linux 上 Path.GetPathRoot 对任意绝对路径都返回 "/"，无法反映真实挂载点。
+    /// 这里用已挂载文件系统的挂载点做最长前缀匹配，找到路径实际所在的磁盘。
+    /// </summary>
+    private static DriveInfo? ResolveDrive(string path)
+    {
+        string full;
+        try
+        {
+            full = Path.GetFullPath(path);
+        }
+        catch
+        {
+            return null;
+        }
+
+        var mounts = DriveInfo.GetDrives()
+            .Where(d => d.IsReady)
+            .Select(d => d.Name)
+            .OrderByDescending(n => n.Length);
+
+        foreach (var mount in mounts)
+        {
+            var prefix = mount.EndsWith('/') ? mount : mount + "/";
+            if (full == mount || full.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                try
+                {
+                    return new DriveInfo(mount);
+                }
+                catch
+                {
+                    // 忽略不可访问的挂载点
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static StorageSnapshot? TryCreateStorageSnapshot(string sharedRootPath)
+    {
+        try
+        {
+            var driveInfo = ResolveDrive(sharedRootPath);
+            if (driveInfo is null || !driveInfo.IsReady)
+            {
+                return null;
+            }
+
+            var totalBytes = driveInfo.TotalSize;
+            // 实际占用用 TotalFreeSpace 计算；可用空间用 AvailableFreeSpace（Linux ext4 会扣除保留块）
+            var usedBytes = totalBytes - driveInfo.TotalFreeSpace;
+            var freeBytes = driveInfo.AvailableFreeSpace;
+            return new StorageSnapshot(driveInfo.Name, totalBytes, usedBytes, freeBytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private const string AdminHtml = """
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>千私云 · 设备配对</title>
+<style>
+  :root { --bg:#f6f8fc; --card:#fff; --border:#e6eaf2; --text:#1c2028; --muted:#727c8a; --accent:#316bff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family:"Segoe UI","Noto Sans CJK SC",system-ui,sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:32px 20px 56px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:18px;
+          padding:22px; margin-bottom:18px; }
+  .qr-wrap { display:flex; gap:22px; align-items:center; flex-wrap:wrap; }
+  #qr { width:220px; height:220px; background:#fff; border:1px solid var(--border);
+        border-radius:14px; padding:8px; }
+  .hint { flex:1; min-width:220px; color:var(--muted); font-size:13px; line-height:1.7; }
+  h2 { font-size:16px; margin:0 0 14px; }
+  dl { margin:0; display:grid; grid-template-columns:120px 1fr; gap:10px 14px; font-size:13px; }
+  dt { color:var(--muted); }
+  dd { margin:0; word-break:break-all; font-weight:600; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  .ok { background:#e8f9f0; color:#1aa268; }
+  .off { background:#fdeff2; color:#d24e5b; }
+  .note { color:var(--muted); font-size:12px; line-height:1.7; margin:8px 2px 0; }
+  .bar { height:10px; border-radius:5px; background:#eaeeF4; overflow:hidden; margin-top:6px; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  button { border:1px solid var(--border); background:#fff; color:var(--text);
+           border-radius:10px; padding:6px 12px; font-size:12px; cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>千私云</h1>
+  <p class="sub">用手机客户端扫描下方二维码，完成密钥传递与设备配对</p>
+
+  <section class="card">
+    <div class="qr-wrap">
+      <img id="qr" alt="配对二维码" src="/api/device/qr.png">
+      <div class="hint">
+        二维码内含设备 ID、名称、访问密钥（secret）和当前可达地址。<br>
+        手机扫码后即可自动填充连接信息，无需手动输入。<br><br>
+        <button onclick="location.reload()">刷新二维码</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>设备信息</h2>
+    <dl id="details"><dt>状态</dt><dd>加载中…</dd></dl>
+  </section>
+
+  <p class="note">
+    此页面仅本机（回环地址）可访问；远程查看请通过 SSH 隧道转发 5034 端口。<br>
+    二维码包含设备密钥，请勿截图外传。文件传输不经过任何云端中转。
+  </p>
+</main>
+<script>
+function fmt(bytes){ if(bytes==null) return "—";
+  var u=["B","KB","MB","GB","TB"],i=0,n=bytes;
+  while(n>=1024&&i<u.length-1){n/=1024;i++;}
+  return n.toFixed(i?1:0)+" "+u[i]; }
+fetch('/api/device/info').then(function(r){return r.json();}).then(function(d){
+  var st=d.fileBrowser&&d.fileBrowser.running;
+  var s=d.storage||{};
+  var pct=s.totalBytes?Math.round(s.usedBytes/s.totalBytes*100):0;
+  var addr=d.addresses||{};
+  var lan=(addr.lanIpv4||[]).join(', ')||'—';
+  var html='';
+  html+='<dt>设备名称</dt><dd>'+(d.deviceName||'—')+'</dd>';
+  html+='<dt>设备 ID</dt><dd>'+(d.deviceId||'—')+'</dd>';
+  html+='<dt>文件服务</dt><dd><span class="badge '+(st?'ok':'off')+'">'+(st?'运行中':'未运行')+'</span></dd>';
+  html+='<dt>公网 IPv6</dt><dd>'+(addr.ipv6||'未检测到')+'</dd>';
+  html+='<dt>局域网 IPv4</dt><dd>'+lan+'</dd>';
+  html+='<dt>共享目录</dt><dd>'+((d.fileBrowser&&d.fileBrowser.sharedRoot)||'—')+'</dd>';
+  html+='<dt>存储空间</dt><dd>'+fmt(s.usedBytes)+' / '+fmt(s.totalBytes)+'（'+pct+'%）'+
+        '<div class="bar"><i style="width:'+pct+'%"></i></div></dd>';
+  document.getElementById('details').innerHTML=html;
+}).catch(function(e){
+  document.getElementById('details').innerHTML='<dt>状态</dt><dd>读取失败</dd>';
+});
+</script>
+</body>
+</html>
+""";
 }
 
 internal sealed record CreateMediaRelayTicketRequest(string Path);
+internal sealed record TrashRestoreRequest(string Id);
 internal sealed record StorageSnapshot(string DriveName, long TotalBytes, long UsedBytes, long FreeBytes);

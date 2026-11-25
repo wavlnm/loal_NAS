@@ -8,7 +8,7 @@ public sealed class FileBrowserOptions
 
     public int Port { get; set; } = 38080;
 
-    public string RelativeExecutablePath { get; set; } = "tools/filebrowser/filebrowser.exe";
+    public string RelativeExecutablePath { get; set; } = "tools/filebrowser/filebrowser";
 
     public string RuntimeDirectoryName { get; set; } = "runtime/filebrowser";
 

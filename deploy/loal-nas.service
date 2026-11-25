@@ -1,0 +1,23 @@
+[Unit]
+Description=千私云 loal_NAS (Linux 重建版)
+Documentation=file:///home/kali/项目/loal-nas-linux/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kali
+Group=kali
+WorkingDirectory=/home/kali/项目/loal-nas-linux/publish
+ExecStart=/home/kali/项目/loal-nas-linux/publish/LoalNas.Host
+Restart=on-failure
+RestartSec=5
+# 防火墙自动放行（iptables/nft）需要 CAP_NET_ADMIN；以普通用户运行即可，无需 root
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=loal-nas
+
+[Install]
+WantedBy=multi-user.target

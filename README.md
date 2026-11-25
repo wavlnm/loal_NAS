@@ -1,95 +1,145 @@
-# loal_NAS
+# loal_NAS · Linux 重建版
 
-把个人电脑变成私人云盘的 Windows 端 MVP。
+把个人电脑变成私人云盘的 **Linux 端**实现，核心功能与原 Windows 版（`/home/kali/项目/loal_NAS`）一致：
+外壳程序拉起内置的 [FileBrowser](https://github.com/filebrowser/filebrowser) 子进程（仅监听 `127.0.0.1`），
+再用 ASP.NET Core 在 `[::]:5034` 对外，把 FileBrowser 的 API 反代到 `/api/filebrowser/*`，
+并在其上叠加 IP 限流封禁、手机端签名鉴权、媒体中转票据、上传磁盘检查等能力。
 
-当前仓库已经落了一个最小可运行方案：ASP.NET Core 宿主在启动时自动拉起本地 FileBrowser，并通过自己的 API 前缀把 FileBrowser 的文件接口代理出去。
+技术栈：.NET 10（C#，与原项目同一套代码逻辑）+ FileBrowser v2.63.23（Linux amd64）。
 
-## 当前 MVP 行为
+## 与 Windows 版的差异
 
-1. 宿主进程启动时自动启动 FileBrowser。
-2. 宿主进程关闭时自动关闭 FileBrowser。
-3. 宿主默认监听 `http://[::]:5034`，可被同局域网 IPv6 地址访问。
-4. FileBrowser 只监听 `127.0.0.1`，不会直接暴露到公网。
-5. 首次运行会自动创建一个单独的 `file` 目录，只暴露这个目录。
-6. 你的外部接口前缀固定为 `/api/filebrowser/*`。
-7. FileBrowser 原生 API 路径保持不变，只是去掉最前面的 `/api` 再挂到你的前缀下。
-8. 当前登录流程直接复用 FileBrowser 的 noauth 模式：`GET /api/filebrowser/login` 会返回 JWT，后续请求需要带上 `X-Auth: <token>`。
-9. 宿主启动后会在终端打印当前电脑可用的 IPv6 访问地址。
-10. 宿主启动时会检查 Windows 防火墙是否已放行对外监听端口；如果没有，会自动运行防火墙脚本尝试放行。
-11. 宿主启动后会打开一个最小桌面窗口，显示当前服务状态、绑定地址、IPv6 地址和共享目录。
-12. 窗口关闭即退出整个应用，并把 FileBrowser 一起关闭。
-13. 宿主新增了短时有效的媒体中转票据接口，供手机端把视频交给系统外部播放器打开，而不必把 `X-Auth` 直接暴露给外部应用。
+| 方面 | Windows 原版 | Linux 重建版 |
+| --- | --- | --- |
+| 目标框架 | `net8.0-windows` + WinForms | `net10.0`，无 WinForms |
+| 状态/配对界面 | 桌面 WinForms 窗口 | 本地 Web 面板 `/admin`（仅回环可访问） |
+| 二维码 | QRCoder + System.Drawing | QRCoder `PngByteQRCode`，免 libgdiplus |
+| 设备 ID | 注册表 MachineGuid | `/etc/machine-id` |
+| 防火墙 | PowerShell `New-NetFirewallRule` | ufw / firewalld / iptables 自适应放行 |
+| 云上报 | 上报 IPv6 到 `reportzs.me` | **已移除**（纯本地/局域网，地址随二维码下发） |
+| 注册状态机 | 未注册/注册中/已注册 | **已移除**（无云账号概念） |
 
-## 目录说明
+核心 Web 逻辑（反代、签名鉴权、限流、媒体中转、磁盘检查、设备追踪、网络探测）与原版保持一致。
 
-- `src/LoalNas.Host`：最小 C# 宿主服务。
-- `tools/filebrowser/filebrowser.exe`：仓库内置的 FileBrowser 二进制。
-- `src/LoalNas.Host/bin/.../runtime/filebrowser/file`：首次运行后自动创建的受控文件目录。
+## 目录结构
 
-## 运行方式
+```
+loal-nas-linux/
+├─ src/LoalNas.Host/        # C# 源码
+│  ├─ Program.cs            # Web 宿主 + 端点 + 本地面板
+│  ├─ Configuration/        # Host / FileBrowser / Firewall 配置类
+│  └─ Services/             # 反代、鉴权、限流、媒体中转、设备身份、网络探测、防火墙、二维码
+├─ tools/filebrowser/       # 内置 FileBrowser Linux 二进制
+├─ publish/                 # dotnet publish 产物（可直接运行）
+└─ deploy/                  # systemd 单元与安装脚本
+```
 
-1. 在仓库根目录执行 `dotnet run --project src/LoalNas.Host`。
-2. 启动后会出现 `loal_NAS Host` 窗口；可以直接看当前宿主状态和 FileBrowser 状态。
-3. 宿主默认监听 `http://[::]:5034`，从其它设备访问时要写成 `http://[你的IPv6地址]:5034`。
-4. 访问 `GET /api/system/status` 确认宿主和 FileBrowser 都已启动。
-5. 先调用 `GET /api/filebrowser/login` 拿到 token。
-6. 手机端后续对接 `/api/filebrowser/*` 时，在请求头里带 `X-Auth: <token>`。
+## 运行
 
-说明：
+开发运行：
 
-- `http://[::]:5034` 表示监听所有 IPv6 地址，不是实际访问地址。
-- 手机端实际访问时，要把 `::` 换成电脑当前的 IPv6 地址，例如 `http://[2408:xxxx:....]:5034`。
-- 如果使用链路本地地址 `fe80::...`，通常还需要网卡作用域；面向普通用户时更推荐使用公网 IPv6 或 ULA 地址。
-- 启动成功后，终端会直接打印可用 IPv6 URL，优先使用其中的 `Global IPv6` 或 `Unique local IPv6`。
-- 如果 5034 端口尚未放行，宿主会在启动时自动检查并尝试运行防火墙脚本。
-- 如果当前进程不是管理员权限，Windows 可能会弹出 UAC 提示来请求放行脚本提升权限。
-- 关闭桌面窗口等于退出应用；不需要再手动找宿主和 FileBrowser 两个进程分别结束。
+```bash
+cd src/LoalNas.Host
+dotnet run -c Release
+```
 
-## 防火墙脚本
+直接跑发布产物：
 
-- 脚本位置：`scripts/Enable-LoalNasFirewallRule.ps1`
-- 默认行为：放行 Windows 入站 TCP 5034 端口，作用于 `Any` 配置文件。
-- 管理员 PowerShell 执行：`powershell -ExecutionPolicy Bypass -File .\scripts\Enable-LoalNasFirewallRule.ps1`
-- 如果你只想放行 `Public`，可执行：`powershell -ExecutionPolicy Bypass -File .\scripts\Enable-LoalNasFirewallRule.ps1 -Profiles Public`
-- 如果你明确需要所有网络配置文件都放行，可执行：`powershell -ExecutionPolicy Bypass -File .\scripts\Enable-LoalNasFirewallRule.ps1 -Profiles Any`
+```bash
+./publish/LoalNas.Host
+```
 
-示例：
+启动后：
 
-- 登录取 token：`GET /api/filebrowser/login`
-- 文件列表：`GET /api/filebrowser/resources/`，并带 `X-Auth: <token>`
-- 文件上传：沿用 FileBrowser 原生上传接口，只是把前缀改成 `/api/filebrowser`
-- 外部视频播放中转：`POST /api/system/media-tickets`，带 `X-Auth: <token>` 和 JSON `{ "path": "/video.mp4" }`，返回短时有效的 `url`
+- 对外服务：`http://[::]:5034`（手机/局域网设备访问；有公网 IPv6 时可外网直连）
+- 本地配对面板：`http://127.0.0.1:5034/admin`（**仅回环可访问**，远程请用 SSH 隧道：`ssh -L 5034:127.0.0.1:5034 用户@主机`）
 
-## 为什么当前选择启动即常驻
+## 手机配对流程（密钥传递）
 
-对 MVP 来说，启动即常驻比“来请求再拉起 FileBrowser”更省代码，也更稳：
+1. 浏览器打开 `http://127.0.0.1:5034/admin`，页面显示配对二维码。
+2. 二维码内容为 `{ deviceId, deviceName, secret, ip }`，`ip` 优先取公网 IPv6，否则取局域网 IPv4。
+3. 手机客户端扫码后得到 `secret` 与地址，后续每个请求携带三个头：
+   - `X-NAS-Timestamp`：Unix 秒级时间戳
+   - `X-NAS-Nonce`：随机字符串（一次性，防重放）
+   - `X-NAS-Hash`：`SHA-256(secret:timestamp:nonce)` 的小写 hex
+4. 时间戳允许 ±30 秒偏移；同一 nonce 在窗口内重复使用会被拒绝（401）。
 
-1. 不需要额外处理冷启动超时。
-2. 不需要在每个请求上判断和等待子进程拉起。
-3. 后续手机端调试时行为更稳定。
+> 面板与 `/api/device/*` 接口仅限回环访问，避免 `secret` 经公网泄露。
 
-如果后面确认内存占用或待机策略有压力，再改成按需拉起更合适。
+## 主要端点
 
-## Push troubleshooting notes
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/`、`/api/system/status` | 服务状态、存储快照（免鉴权） |
+| ANY | `/api/filebrowser/{...}` | 反代 FileBrowser API（需手机签名头） |
+| POST | `/api/system/media-tickets` | 用 `X-Auth` 换取短时媒体中转票据 |
+| GET/HEAD | `/api/system/media-open/{ticketId}/{fileName}` | 票据取流，支持 Range/拖动（URL 带真实扩展名） |
+| GET | `/api/trash` | 回收站列表（需手机签名头） |
+| POST | `/api/trash/restore` | 恢复条目，body `{"id":"..."}`（原位置冲突返回 409） |
+| DELETE | `/api/trash/{id}` | 彻底删除单条 |
+| DELETE | `/api/trash` | 清空回收站 |
 
-This repository originally failed to push over HTTPS because outbound access to github.com:443 was unstable.
+> 删除语义：`DELETE /api/filebrowser/resources/*` 不再真正删除，而是把文件/目录移动到共享目录外的 `.trash/`（同一磁盘，rename 即可），可在回收站恢复。`.trash` 不在 FileBrowser 根目录内，不会出现在文件列表。
+>
+> 自动清理：`LoalNas:Trash:RetentionDays`（默认 30 天，`<=0` 关闭），`CleanupIntervalHours` 控制检查间隔（默认每小时）；启动时也会立即清理一次。
+| GET | `/admin` | 本地配对面板（仅回环） |
+| GET | `/api/device/info` | 设备信息 JSON（仅回环） |
+| GET | `/api/device/qr.png` | 配对二维码 PNG（仅回环） |
+| GET | `/api/device/payload` | 二维码原始载荷（仅回环，调试用） |
 
-The working fix was:
+## 防火墙自动放行
 
-1. Keep the repository remote on SSH over port 443: `ssh://git@ssh.github.com:443/wavlnm/loal_NAS.git`
-2. Do not reuse the default `~/.ssh/id_rsa` key when it is already bound to another repository as a deploy key
-3. Create a repository-specific SSH key for this repository
-4. Add that key to GitHub as a writable deploy key
-5. Configure Git to use that key with `core.sshCommand`
+`appsettings.json` 中 `LoalNas:Firewall:AutoConfigureOnStartup=true` 时，启动会自动放行对外端口：
 
-Current local configuration:
+- `Tool=auto`：按 ufw（活动）→ firewalld（运行）→ iptables 顺序探测；
+- 也可强制 `ufw` / `firewalld` / `iptables` / `none`。
 
-- Remote: `origin -> ssh://git@ssh.github.com:443/wavlnm/loal_NAS.git`
-- SSH key: `C:/Users/Administrator/.ssh/id_ed25519_loal_NAS`
-- Branch tracking: `master -> origin/master`
+放行需要 `CAP_NET_ADMIN`。systemd 单元已通过 `AmbientCapabilities=CAP_NET_ADMIN` 授予，
+因此以普通用户 `kali` 运行即可，无需 root。若手动前台运行且非 root，会记录警告并打印手动命令：
 
-If push fails again, first verify:
+```bash
+sudo iptables -I INPUT -p tcp --dport 5034 -j ACCEPT
+```
 
-- `ssh -T -p 443 git@ssh.github.com`
-- `git config --get core.sshCommand`
-- `git remote -v`
+## 安装为系统服务
+
+```bash
+./deploy/install-service.sh                 # 复制单元并 daemon-reload（不自动启用）
+sudo systemctl enable --now loal-nas        # 开机自启并立即启动
+journalctl -u loal-nas -f                   # 查看日志
+```
+
+## 配置（appsettings.json）
+
+- `LoalNas:Host:Url`：对外监听地址，默认 `http://[::]:5034`。
+- `LoalNas:FileBrowser:Port`：FileBrowser 内部端口，默认 `38080`（仅 127.0.0.1）。
+- `LoalNas:FileBrowser:RuntimeDirectoryName`：运行目录，默认相对发布目录的 `runtime/filebrowser`；
+  **可填绝对路径**（如 `/home/kali/千私云数据`）把共享文件放到别处。
+- `LoalNas:FileBrowser:RootFolderName`：实际共享的子目录名，默认 `file`。
+- `LoalNas:Firewall:Tool`：防火墙工具，默认 `auto`。
+
+设备身份与 `secret` 持久化在 `~/.local/share/loal-nas/`（`device-id.txt`、`device-secret.txt`）。
+删除 `device-secret.txt` 会在下次启动重新生成密钥（手机需重新扫码）。
+
+## 安全说明
+
+- FileBrowser 以 `--noauth --disableExec` 启动，只监听 `127.0.0.1`，不直接对外；对外一律经外壳的签名鉴权。
+- 面板与设备接口仅回环可达；`secret` 只通过二维码下发，不在面板明文展示。
+- 已移除云端上报，文件传输与地址发现均不经过任何第三方服务器。
+
+## 已知问题与排查
+
+- **视频黑屏一直转圈**：优先换浏览器（Chrome / VLC 等）。实测部分厂商自带浏览器（如荣耀 HonorBrowser）即使服务端正确返回 `206 video/mp4` 也无法播放；同一链接换 Chrome/VLC 正常。
+- **视频能下不能边下边播**：MP4 的 `moov` 索引必须在文件头（faststart）。若在末尾，边下边播的播放器会卡住。无损修复：
+  `ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4`
+- 媒体链接已带真实扩展名；媒体响应会剥离 FileBrowser 的 `Content-Security-Policy`、`X-Content-Type-Options` 等头，以提升浏览器兼容性。
+
+## 本机验证结果
+
+冒烟测试（.NET 10 / Kali，amd64）已通过：
+
+- `/api/system/status`、`/admin`、`/api/device/info`、`/api/device/qr.png`（PNG 584×584）均 200；
+- 设备 ID 来自 `/etc/machine-id`，正确探测到公网 IPv6 与局域网 IPv4；
+- 完整鉴权链路：合法签名 → 登录得 JWT（200）→ 带签名访问目录（200）；
+- 重放 nonce / 无签名头 / 错误 hash 均返回 401；
+- 防火墙自动放行逻辑触发正常（非 root 时按预期降级为告警+手动命令）。

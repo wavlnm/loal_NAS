@@ -1,23 +1,20 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UseWindowsForms>true</UseWindowsForms>
-    <ApplicationIcon>Assets\qiansiyun.ico</ApplicationIcon>
+    <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyTitle>千私云</AssemblyTitle>
     <Product>千私云</Product>
+    <RootNamespace>LoalNas.Host</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="..\..\tools\filebrowser\filebrowser.exe" Link="tools/filebrowser/filebrowser.exe">
+    <Content Include="../../tools/filebrowser/filebrowser" Link="tools/filebrowser/filebrowser">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="..\..\tools\filebrowser\LICENSE" Link="tools/filebrowser/LICENSE">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="..\..\scripts\Enable-LoalNasFirewallRule.ps1" Link="scripts/Enable-LoalNasFirewallRule.ps1">
+    <Content Include="../../tools/filebrowser/LICENSE" Link="tools/filebrowser/LICENSE">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
