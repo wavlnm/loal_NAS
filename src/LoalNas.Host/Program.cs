@@ -76,6 +76,7 @@ internal static class Program
         builder.Services.AddHostedService(services => services.GetRequiredService<FileBrowserProcessManager>());
         builder.Services.AddSingleton<FileBrowserApiProxy>();
         builder.Services.AddSingleton<MediaRelayService>();
+        builder.Services.AddSingleton<VideoThumbnailService>();
         builder.Services.AddSingleton<LinuxFirewallEnsurer>();
         builder.Services.AddSingleton<ConnectedDeviceTracker>();
         builder.Services.AddSingleton<DeviceIdentityService>();
@@ -125,6 +126,30 @@ internal static class Program
         // 带文件名的形式：/api/system/media-open/{ticketId}/{fileName}
         app.MapMethods("/api/system/media-open/{ticketId}/{**fileName}", new[] { HttpMethods.Get, HttpMethods.Head },
             (HttpContext context, string ticketId, string? fileName, MediaRelayService relay) => relay.ProxyMediaAsync(context, ticketId));
+
+        // ── 视频封面（ffmpeg 抽帧，按文件缓存） ─────────────────────────────────
+        app.MapGet("/api/video-thumb",
+            async (HttpContext context, string? path, VideoThumbnailService thumbs) =>
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    return Results.BadRequest(new { error = "missing_path" });
+                }
+
+                var (status, filePath) = await thumbs.GetThumbnailAsync(path, context.RequestAborted);
+                switch (status)
+                {
+                    case VideoThumbnailService.ThumbnailStatus.Ok:
+                        context.Response.Headers["Cache-Control"] = "private, max-age=86400";
+                        return Results.File(filePath!, "image/jpeg");
+                    case VideoThumbnailService.ThumbnailStatus.NotFound:
+                        return Results.NotFound();
+                    case VideoThumbnailService.ThumbnailStatus.Invalid:
+                        return Results.BadRequest(new { error = "invalid_path" });
+                    default:
+                        return Results.StatusCode(StatusCodes.Status500InternalServerError);
+                }
+            });
 
         // ── 回收站 ─────────────────────────────────────────────────────────────
         app.MapGet("/api/trash", (TrashService trash) => Results.Ok(new { items = trash.List() }));
