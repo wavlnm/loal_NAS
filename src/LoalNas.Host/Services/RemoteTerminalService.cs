@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using LoalNas.Host.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace LoalNas.Host.Services;
 
@@ -13,7 +15,8 @@ public sealed record TerminalExecResult(
     long DurationMs);
 
 /// <summary>
-/// 手机端远程终端：默认关闭，只能在本地 /admin 面板开启（可带有效期，重启服务即失效）。
+/// 手机端远程终端：默认状态由 LoalNas:RemoteTerminal 配置决定（默认开启且永久有效），
+/// 也可以在本地 /admin 面板临时开启（可带有效期）或关闭；重启服务后回到配置里的默认值。
 /// 每次执行都会写审计日志：共享目录下 .terminal-logs/terminal-yyyy-MM-dd.log；
 /// 跨天后旧日志自动移入回收站，复用回收站 30 天保留策略。
 /// </summary>
@@ -41,12 +44,19 @@ public sealed class RemoteTerminalService
     public RemoteTerminalService(
         FileBrowserProcessManager manager,
         TrashService trash,
+        IOptions<RemoteTerminalOptions> options,
         ILogger<RemoteTerminalService> logger)
     {
         _logger = logger;
         _trash = trash;
         _shareRoot = Path.GetFullPath(manager.SharedRootPath);
         _logDirectory = Path.Combine(_shareRoot, ".terminal-logs");
+
+        var startup = options.Value;
+        _enabled = startup.Enabled;
+        _expiresAt = startup is { Enabled: true, DurationMinutes: > 0 }
+            ? DateTimeOffset.Now.AddMinutes(startup.DurationMinutes)
+            : null;
     }
 
     public bool Enabled

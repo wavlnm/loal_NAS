@@ -53,6 +53,8 @@ internal static class Program
         builder.Services.Configure<PublicHostOptions>(builder.Configuration.GetSection(PublicHostOptions.SectionName));
         builder.Services.Configure<FirewallOptions>(builder.Configuration.GetSection(FirewallOptions.SectionName));
         builder.Services.Configure<TrashOptions>(builder.Configuration.GetSection(TrashOptions.SectionName));
+        builder.Services.Configure<ScreenCaptureOptions>(builder.Configuration.GetSection(ScreenCaptureOptions.SectionName));
+        builder.Services.Configure<RemoteTerminalOptions>(builder.Configuration.GetSection(RemoteTerminalOptions.SectionName));
         builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
 
         builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
@@ -82,6 +84,7 @@ internal static class Program
         builder.Services.AddSingleton<VideoThumbnailService>();
         builder.Services.AddSingleton<AudioTranscodeService>();
         builder.Services.AddSingleton<RemoteTerminalService>();
+        builder.Services.AddSingleton<ScreenCaptureService>();
         builder.Services.AddSingleton<LinuxFirewallEnsurer>();
         builder.Services.AddSingleton<ConnectedDeviceTracker>();
         builder.Services.AddSingleton<DeviceIdentityService>();
@@ -209,7 +212,7 @@ internal static class Program
                 }
             });
 
-        // ── 远程终端（默认关闭；只能在本地 /admin 面板开启，可带有效期） ────────
+        // ── 远程终端（默认状态由 LoalNas:RemoteTerminal 配置决定；/admin 可临时开关） ────
         app.MapGet("/api/system/terminal/status",
             (RemoteTerminalService terminal) =>
                 Results.Ok(new { enabled = terminal.Enabled, expiresAt = terminal.ExpiresAt }));
@@ -247,6 +250,28 @@ internal static class Program
                     timedOut = result.TimedOut,
                     durationMs = result.DurationMs,
                 });
+            });
+
+        // ── 看屏幕（X11 ximagesrc 常驻抓取；取图走常规签名鉴权，参数裁剪在 service 内） ──
+        app.MapGet("/api/system/screen",
+            async (HttpContext context, ScreenCaptureService screen, int? w, int? q, string? format) =>
+            {
+                var (width, quality, fmt) = screen.Normalize(w, q, format);
+                var frame = await screen.GetFrameAsync(width, quality, fmt, context.RequestAborted);
+                if (frame is null)
+                {
+                    return Results.Json(new { error = "no_frame" }, statusCode: 503);
+                }
+
+                context.Response.Headers.CacheControl = "no-store";
+                var ifNoneMatch = context.Request.Headers.IfNoneMatch.ToString();
+                if (!string.IsNullOrEmpty(ifNoneMatch) && ifNoneMatch == frame.ETag)
+                {
+                    return Results.StatusCode(StatusCodes.Status304NotModified);
+                }
+
+                context.Response.Headers.ETag = frame.ETag;
+                return Results.File(frame.Bytes, frame.ContentType);
             });
 
         app.MapGet("/admin/terminal/status", (HttpContext context, RemoteTerminalService terminal) =>

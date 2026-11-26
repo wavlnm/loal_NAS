@@ -78,6 +78,10 @@ dotnet run -c Release
 | POST | `/api/trash/restore` | 恢复条目，body `{"id":"..."}`（原位置冲突返回 409） |
 | DELETE | `/api/trash/{id}` | 彻底删除单条 |
 | DELETE | `/api/trash` | 清空回收站 |
+| GET | `/api/system/terminal/status` | 远程终端开关状态（需手机签名头） |
+| POST | `/api/system/terminal/exec` | 执行一条 bash 指令，body `{"command":"..."}`；未开启时直接 404 |
+| GET | `/api/system/screen` | 看屏幕：返回电脑当前一帧画面，参数 `w`(640~1920) / `q`(10~95) / `format=jpeg\|png`；支持 `If-None-Match` → 304 |
+| GET/POST | `/admin/terminal/{status,enable,disable}` | 本地临时开关终端（仅回环 + Admin Token） |
 
 > 删除语义：`DELETE /api/filebrowser/resources/*` 不再真正删除，而是把文件/目录移动到共享目录外的 `.trash/`（同一磁盘，rename 即可），可在回收站恢复。`.trash` 不在 FileBrowser 根目录内，不会出现在文件列表。
 >
@@ -117,6 +121,25 @@ journalctl -u loal-nas -f                   # 查看日志
   **可填绝对路径**（如 `/home/kali/千私云数据`）把共享文件放到别处。
 - `LoalNas:FileBrowser:RootFolderName`：实际共享的子目录名，默认 `file`。
 - `LoalNas:Firewall:Tool`：防火墙工具，默认 `auto`。
+- `LoalNas:RemoteTerminal:Enabled`：远程终端是否默认开启，默认 `true`；`DurationMinutes` 为启动时的有效期（`0` = 永久）。`/admin` 面板的临时开关只影响当前进程，重启后回到这里的默认值。
+- `LoalNas:ScreenCapture:*`：看屏幕参数 —— `MaxWidth`/`MinWidth` 允许的宽度范围、`DefaultWidth`/`DefaultQuality` 未带参数时的默认值、`Framerate` 抓取进程出帧频率（默认 10）、`MaxFrameAgeSeconds` 帧新鲜度上限（默认 5 秒，超过则视为抓取停摆并重新拉起）、`IdleSeconds` 空闲多久停掉抓取进程（默认 60）、`WorkerScript` 抓取脚本相对发布目录的路径、`OutputDirectory` 帧缓存目录（留空用 `~/.cache/loalnas/screen`）。
+
+## 看屏幕（X11）
+
+服务端 `ScreenCaptureService` 按需拉起常驻抓取进程 `tools/screen-capture/screen_worker.py`，
+用 gstreamer `ximagesrc` 直接读 X 根窗口，写最新几帧到缓存目录，HTTP 侧只读文件；
+参数变化会重启抓取进程并清掉旧帧，空闲 `IdleSeconds` 后自动停止。
+
+- 只支持 **X11 会话**（Xfce/Xorg）。Wayland/GNOME 的 `org.gnome.Mutter.ScreenCast` 路径在 GNOME 51 上有
+  stride 断言崩溃（`meta-stream-source.c:994`，会把整个桌面弄崩），已弃用。
+- 息屏（DPMS）不影响 X 根窗口帧缓冲，黑屏也能抓到真实桌面；抓取进程**不会**主动点亮屏幕。
+- 依赖：`gstreamer1.0-plugins-good`（`ximagesrc`）、`gstreamer1.0-plugins-base`、`x11-xserver-utils`（`xdpyinfo`）。
+- `DISPLAY`/`XAUTHORITY` 由服务端从图形会话进程（优先 `xfce4-session`）的 `/proc/*/environ` 读取后传给抓取进程，
+  所以服务本身跑在 system 服务里也不需要写死显示编号。
+- 带宽参考（1920x1080 桌面实测，公网 3Mbps ≈ 0.35MB/s）：`1280 q60` 约 100~180KB、`1920 q85` 约 330~560KB、
+  PNG 完全取决于画面内容（大片纯色时比 JPEG 还小，壁纸/视频则可达 400KB+）。公网建议 1280 档。
+- 安全：接口走常规每请求签名头鉴权（`X-NAS-Timestamp/Nonce/Hash`），未加 `/admin` 开关 —— 已知代价是
+  画面内容（含屏幕上的密码、验证码）会一并推给手机。
 
 设备身份与 `secret` 持久化在 `~/.local/share/loal-nas/`（`device-id.txt`、`device-secret.txt`）。
 删除 `device-secret.txt` 会在下次启动重新生成密钥（手机需重新扫码）。
