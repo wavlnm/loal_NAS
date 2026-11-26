@@ -20,6 +20,9 @@
     <Content Include="tools/screen-capture/screen_worker.py" Link="tools/screen-capture/screen_worker.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="tools/monitor/camera_worker.py" Link="tools/monitor/camera_worker.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

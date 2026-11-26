@@ -55,6 +55,7 @@ internal static class Program
         builder.Services.Configure<TrashOptions>(builder.Configuration.GetSection(TrashOptions.SectionName));
         builder.Services.Configure<ScreenCaptureOptions>(builder.Configuration.GetSection(ScreenCaptureOptions.SectionName));
         builder.Services.Configure<RemoteTerminalOptions>(builder.Configuration.GetSection(RemoteTerminalOptions.SectionName));
+        builder.Services.Configure<MonitorOptions>(builder.Configuration.GetSection(MonitorOptions.SectionName));
         builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
 
         builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
@@ -85,6 +86,9 @@ internal static class Program
         builder.Services.AddSingleton<AudioTranscodeService>();
         builder.Services.AddSingleton<RemoteTerminalService>();
         builder.Services.AddSingleton<ScreenCaptureService>();
+        builder.Services.AddSingleton<MicLiveStreamService>();
+        builder.Services.AddSingleton<MonitorService>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<MonitorService>());
         builder.Services.AddSingleton<LinuxFirewallEnsurer>();
         builder.Services.AddSingleton<ConnectedDeviceTracker>();
         builder.Services.AddSingleton<DeviceIdentityService>();
@@ -252,12 +256,18 @@ internal static class Program
                 });
             });
 
-        // ── 看屏幕（X11 ximagesrc 常驻抓取；取图走常规签名鉴权，参数裁剪在 service 内） ──
+        // ── 画面取图：source=desktop（默认，兼容旧客户端）| camera ────────────
         app.MapGet("/api/system/screen",
-            async (HttpContext context, ScreenCaptureService screen, int? w, int? q, string? format) =>
+            async (HttpContext context, ScreenCaptureService screen, MonitorService monitor,
+                    string? source, int? w, int? q, string? format) =>
             {
-                var (width, quality, fmt) = screen.Normalize(w, q, format);
-                var frame = await screen.GetFrameAsync(width, quality, fmt, context.RequestAborted);
+                if (ScreenCaptureService.IsCamera(source) && !monitor.StatusEnabled)
+                {
+                    return Results.Json(new { error = "monitor_disabled" }, statusCode: 403);
+                }
+
+                var (resolvedSource, width, quality, fmt) = screen.Normalize(source, w, q, format);
+                var frame = await screen.GetFrameAsync(resolvedSource, width, quality, fmt, context.RequestAborted);
                 if (frame is null)
                 {
                     return Results.Json(new { error = "no_frame" }, statusCode: 503);
@@ -272,6 +282,83 @@ internal static class Program
 
                 context.Response.Headers.ETag = frame.ETag;
                 return Results.File(frame.Bytes, frame.ContentType);
+            });
+
+        // ── 监控：状态、移动侦测开关、手动录像、事件片段 ─────────────────────
+        app.MapGet("/api/monitor/status", (MonitorService monitor) =>
+            monitor.StatusEnabled
+                ? Results.Ok(monitor.Status())
+                : Results.Json(new { error = "monitor_disabled" }, statusCode: 403));
+
+        app.MapPost("/api/monitor/detect",
+            (MonitorService monitor, MonitorDetectRequest request) =>
+            {
+                if (!monitor.StatusEnabled)
+                {
+                    return Results.Json(new { error = "monitor_disabled" }, statusCode: 403);
+                }
+
+                monitor.ConfigureDetect(request.Enabled, request.Sensitivity);
+                return Results.Ok(monitor.Status());
+            });
+
+        app.MapPost("/api/monitor/record", (MonitorService monitor) =>
+        {
+            if (!monitor.StatusEnabled)
+            {
+                return Results.Json(new { error = "monitor_disabled" }, statusCode: 403);
+            }
+
+            monitor.RequestManualRecording();
+            return Results.Ok(new { accepted = true });
+        });
+
+        app.MapGet("/api/monitor/clips", (MonitorService monitor, string? date) =>
+            monitor.StatusEnabled
+                ? Results.Ok(new
+                {
+                    dates = monitor.ClipDates(),
+                    date = string.IsNullOrWhiteSpace(date) ? DateTime.Now.ToString("yyyy-MM-dd") : date,
+                    items = monitor.ListClips(date),
+                })
+                : Results.Json(new { error = "monitor_disabled" }, statusCode: 403));
+
+        // 听现场：播放器插件带不了每请求签名头，和音频转码缓存一样用一次性不可猜票据放行。
+        app.MapPost("/api/monitor/listen-ticket", (MonitorService monitor) =>
+        {
+            if (!monitor.StatusEnabled)
+            {
+                return Results.Json(new { error = "monitor_disabled" }, statusCode: 403);
+            }
+
+            var options = monitor.ListenOptions;
+            if (!options.Enabled)
+            {
+                return Results.Json(new { error = "listen_disabled" }, statusCode: 403);
+            }
+
+            var key = monitor.IssueListenTicket();
+            return Results.Ok(new
+            {
+                path = $"/api/system/monitor-live/{key}/live.mp3",
+                expiresInSeconds = Math.Clamp(options.ListenTicketTtlSeconds, 30, 3600),
+            });
+        });
+
+        app.MapGet("/api/system/monitor-live/{key}/live.mp3",
+            async (HttpContext context, string key, MonitorService monitor, MicLiveStreamService live) =>
+            {
+                if (!monitor.TryConsumeListenTicket(key))
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    await context.Response.WriteAsJsonAsync(new { error = "bad_ticket" });
+                    return;
+                }
+
+                var options = monitor.ListenOptions;
+                await live.StreamAsync(context, options.ListenBitrateKbps,
+                    options.ListenSampleRate, options.ListenMaxSeconds,
+                    context.RequestAborted);
             });
 
         app.MapGet("/admin/terminal/status", (HttpContext context, RemoteTerminalService terminal) =>
@@ -781,6 +868,7 @@ termRefresh();
 internal sealed record CreateMediaRelayTicketRequest(string Path);
 internal sealed record AudioTranscodeRequest(string Path);
 internal sealed record TerminalExecRequest(string? Command);
+internal sealed record MonitorDetectRequest(bool? Enabled, string? Sensitivity);
 internal sealed record AdminTerminalEnableRequest(int Minutes);
 internal sealed record TrashRestoreRequest(string Id);
 internal sealed record StorageSnapshot(string DriveName, long TotalBytes, long UsedBytes, long FreeBytes);

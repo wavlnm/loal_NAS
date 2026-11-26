@@ -65,7 +65,8 @@ public sealed class PhoneAuthMiddleware
 
         // 转码缓存文件：播放器无法按请求轮换 nonce，靠不可猜的 key（sha256 前 32 位）保护
         if (HttpMethods.IsGet(context.Request.Method) &&
-            path.StartsWith("/api/system/audio-cache/", StringComparison.OrdinalIgnoreCase))
+            (path.StartsWith("/api/system/audio-cache/", StringComparison.OrdinalIgnoreCase) ||
+             path.StartsWith("/api/system/monitor-live/", StringComparison.OrdinalIgnoreCase)))
         {
             await _next(context);
             return;

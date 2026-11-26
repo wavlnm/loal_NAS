@@ -80,7 +80,13 @@ dotnet run -c Release
 | DELETE | `/api/trash` | 清空回收站 |
 | GET | `/api/system/terminal/status` | 远程终端开关状态（需手机签名头） |
 | POST | `/api/system/terminal/exec` | 执行一条 bash 指令，body `{"command":"..."}`；未开启时直接 404 |
-| GET | `/api/system/screen` | 看屏幕：返回电脑当前一帧画面，参数 `w`(640~1920) / `q`(10~95) / `format=jpeg\|png`；支持 `If-None-Match` → 304 |
+| GET | `/api/system/screen` | 取最新一帧画面，参数 `source=desktop\|camera` / `w` / `q` / `format=jpeg\|png`；支持 `If-None-Match` → 304 |
+| GET | `/api/monitor/status` | 监控状态：摄像头进程、侦测设置、最近一次帧差得分、今日片段数 |
+| POST | `/api/monitor/detect` | 开关移动侦测并设灵敏度，body `{"enabled":true,"sensitivity":"low\|mid\|high"}`（持久化，重启后保持） |
+| POST | `/api/monitor/record` | 手动录一段（时长同 `RecordSeconds`） |
+| GET | `/api/monitor/clips?date=YYYY-MM-DD` | 事件片段列表（含共享目录内的相对路径，可直接走文件下载/播放） |
+| POST | `/api/monitor/listen-ticket` | 申请"听现场"一次性票据，返回 `path` |
+| GET | `/api/system/monitor-live/{key}/live.mp3` | 麦克风实时 MP3 流（chunked）；与转码缓存同理，靠不可猜 key 放行，不带签名头 |
 | GET/POST | `/admin/terminal/{status,enable,disable}` | 本地临时开关终端（仅回环 + Admin Token） |
 
 > 删除语义：`DELETE /api/filebrowser/resources/*` 不再真正删除，而是把文件/目录移动到共享目录外的 `.trash/`（同一磁盘，rename 即可），可在回收站恢复。`.trash` 不在 FileBrowser 根目录内，不会出现在文件列表。
@@ -123,6 +129,25 @@ journalctl -u loal-nas -f                   # 查看日志
 - `LoalNas:Firewall:Tool`：防火墙工具，默认 `auto`。
 - `LoalNas:RemoteTerminal:Enabled`：远程终端是否默认开启，默认 `true`；`DurationMinutes` 为启动时的有效期（`0` = 永久）。`/admin` 面板的临时开关只影响当前进程，重启后回到这里的默认值。
 - `LoalNas:ScreenCapture:*`：看屏幕参数 —— `MaxWidth`/`MinWidth` 允许的宽度范围、`DefaultWidth`/`DefaultQuality` 未带参数时的默认值、`Framerate` 抓取进程出帧频率（默认 10）、`MaxFrameAgeSeconds` 帧新鲜度上限（默认 5 秒，超过则视为抓取停摆并重新拉起）、`IdleSeconds` 空闲多久停掉抓取进程（默认 60）、`WorkerScript` 抓取脚本相对发布目录的路径、`OutputDirectory` 帧缓存目录（留空用 `~/.cache/loalnas/screen`）。
+
+- `LoalNas:Monitor:*`：监控参数 —— `Enabled` 总开关、`CameraDevice` 视频设备、`MinWidth/MaxWidth/DefaultWidth/DefaultQuality/PreviewFps` 预览流、`ClipWidth/ClipHeight/RingFps` 事件录像（也是摄像头原生分辨率）、`DetectEnabled/Sensitivity` 侦测默认值、`DetectFps/ConfirmHits/CooldownSeconds` 侦测节奏、`RecordSeconds/ClipCrf/ClipWithAudio` 片段、`ClipFolderName` 共享目录内的片段文件夹名、`Listen*` 听现场码率/采样率/票据时长。
+
+## 监控（摄像头）
+
+`tools/monitor/camera_worker.py` 是一条常驻 gstreamer 管道、`tee` 两路输出，**不能开两个进程抢同一个 `/dev/video0`**：
+
+- 预览路：解码 → 缩放到请求宽度 → `jpegenc` → `multifilesink max-files=3`；手机取图和移动侦测都读这三张里最新的一张。
+- 高清路：原始 MJPEG 帧直接落盘（`max-files` 约等于 `RecordSeconds × RingFps`），相当于滚动保留"最近 N 秒"，触发时不必重开管道。
+
+移动侦测在 worker 里用 PIL 做帧差：缩到 160x90 灰度、高斯模糊 2、比"灰度差 >24 的像素占比"加均值差双阈值，连续 3 次确认，之后冷却 30 秒。阈值是按本机暗光实测标定的：模糊后静止画面的均值差约 0.55、变化占比 0.0000，所以 `high=0.4%`、`mid=1.5%`、`low=5%`。
+
+触发（或手动请求）后：`pw-record` 录同长度音轨 → 取环形高清帧 → ffmpeg 合成 `libx264 + aac` 的 faststart MP4，写进共享目录 `监控录像/YYYY-MM-DD/HHMMSS_auto|_manual.mp4`（10 秒约 2.2MB）。非当天的日期目录在服务启动和跨天后整体移入回收站，沿用回收站 30 天保留策略。
+
+听现场：`pw-record - | ffmpeg -f mp3 -` 的 chunked 流，48kbit/s 单声道 16kHz（6 秒约 36KB）。播放器插件带不了每请求签名头，所以走一次性票据 + 不可猜 key 放行，票据取用即失效。
+
+依赖：`gstreamer1.0-plugins-good`（`v4l2src`）、`gstreamer1.0-plugins-base`、`ffmpeg`（libx264/libmp3lame/aac）、`python3-pil`。
+
+回归检查：`python3 tools/dev/check_monitor.py`（会跑桌面/摄像头取图、ETag/304、40 秒误报观察、听现场流、手动录像、片段规格，结束时恢复原侦测设置）。
 
 ## 看屏幕（X11）
 
