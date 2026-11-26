@@ -6,6 +6,9 @@ namespace LoalNas.Host;
 
 internal static class Program
 {
+    // 本地 /admin 面板改状态用的令牌（每次启动随机；页面里内嵌给同源 JS 使用）
+    private static readonly string AdminToken =
+        Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
     private static async Task Main(string[] args)
     {
         var app = BuildApplication(args);
@@ -78,6 +81,7 @@ internal static class Program
         builder.Services.AddSingleton<MediaRelayService>();
         builder.Services.AddSingleton<VideoThumbnailService>();
         builder.Services.AddSingleton<AudioTranscodeService>();
+        builder.Services.AddSingleton<RemoteTerminalService>();
         builder.Services.AddSingleton<LinuxFirewallEnsurer>();
         builder.Services.AddSingleton<ConnectedDeviceTracker>();
         builder.Services.AddSingleton<DeviceIdentityService>();
@@ -205,6 +209,75 @@ internal static class Program
                 }
             });
 
+        // ── 远程终端（默认关闭；只能在本地 /admin 面板开启，可带有效期） ────────
+        app.MapGet("/api/system/terminal/status",
+            (RemoteTerminalService terminal) =>
+                Results.Ok(new { enabled = terminal.Enabled, expiresAt = terminal.ExpiresAt }));
+
+        app.MapPost("/api/system/terminal/exec",
+            async (HttpContext context, TerminalExecRequest request, RemoteTerminalService terminal) =>
+            {
+                if (!terminal.Enabled)
+                {
+                    // 未开启时连能力都不暴露
+                    return Results.NotFound();
+                }
+
+                var command = (request.Command ?? string.Empty).Trim();
+                if (command.Length == 0)
+                {
+                    return Results.BadRequest(new { error = "empty_command" });
+                }
+                if (command.Length > 4000)
+                {
+                    return Results.BadRequest(new { error = "command_too_long" });
+                }
+
+                var result = await terminal.ExecuteAsync(
+                    command,
+                    context.Connection.RemoteIpAddress?.ToString(),
+                    context.RequestAborted);
+
+                return Results.Ok(new
+                {
+                    exitCode = result.ExitCode,
+                    stdout = result.Stdout,
+                    stderr = result.Stderr,
+                    truncated = result.Truncated,
+                    timedOut = result.TimedOut,
+                    durationMs = result.DurationMs,
+                });
+            });
+
+        app.MapGet("/admin/terminal/status", (HttpContext context, RemoteTerminalService terminal) =>
+            IsLoopback(context)
+                ? Results.Ok(new { enabled = terminal.Enabled, expiresAt = terminal.ExpiresAt })
+                : Results.StatusCode(StatusCodes.Status403Forbidden));
+
+        app.MapPost("/admin/terminal/enable",
+            (HttpContext context, AdminTerminalEnableRequest request, RemoteTerminalService terminal) =>
+            {
+                if (!IsLoopback(context) || !HasAdminToken(context))
+                {
+                    return Results.StatusCode(StatusCodes.Status403Forbidden);
+                }
+
+                var minutes = Math.Clamp(request.Minutes, 0, 60 * 24 * 30);
+                terminal.Enable(minutes <= 0 ? null : TimeSpan.FromMinutes(minutes));
+                return Results.Ok(new { enabled = terminal.Enabled, expiresAt = terminal.ExpiresAt });
+            });
+
+        app.MapPost("/admin/terminal/disable", (HttpContext context, RemoteTerminalService terminal) =>
+        {
+            if (!IsLoopback(context) || !HasAdminToken(context))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
+            terminal.Disable();
+            return Results.Ok(new { enabled = false });
+        });
+
         // ── 回收站 ─────────────────────────────────────────────────────────────
         app.MapGet("/api/trash", (TrashService trash) => Results.Ok(new { items = trash.List() }));
 
@@ -313,7 +386,7 @@ internal static class Program
         // ── 本地回环面板：展示配对二维码，完成密钥传递 ──────────────────────────
         app.MapGet("/admin", (HttpContext context) =>
             IsLoopback(context)
-                ? Results.Content(AdminHtml, "text/html; charset=utf-8")
+                ? Results.Content(BuildAdminHtml(), "text/html; charset=utf-8")
                 : Results.StatusCode(StatusCodes.Status403Forbidden));
 
         app.MapGet("/api/device/info", (HttpContext context, FileBrowserProcessManager manager, DeviceIdentityService identity) =>
@@ -548,6 +621,14 @@ internal static class Program
         }
     }
 
+    private static bool HasAdminToken(HttpContext context) =>
+        string.Equals(
+            context.Request.Headers["X-Admin-Token"].ToString(),
+            AdminToken,
+            StringComparison.Ordinal);
+
+    private static string BuildAdminHtml() => AdminHtml.Replace("__ADMIN_TOKEN__", AdminToken);
+
     private const string AdminHtml = """
 <!doctype html>
 <html lang="zh">
@@ -604,6 +685,21 @@ internal static class Program
     <dl id="details"><dt>状态</dt><dd>加载中…</dd></dl>
   </section>
 
+  <section class="card">
+    <h2>远程终端</h2>
+    <p class="note" style="margin:0 0 12px">
+      开启后，手机端「工具 → 终端指令」可以让电脑执行命令（以 kali 身份）。到期自动关闭，服务重启也会关闭。
+    </p>
+    <p style="font-size:13px;margin:0 0 12px">状态：<span id="term-state">读取中…</span></p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button onclick="termEnable(30)">开启 30 分钟</button>
+      <button onclick="termEnable(120)">开启 2 小时</button>
+      <button onclick="termEnable(480)">开启 8 小时</button>
+      <button onclick="termEnable(0)">永久开启（不推荐）</button>
+      <button onclick="termDisable()">立即关闭</button>
+    </div>
+  </section>
+
   <p class="note">
     此页面仅本机（回环地址）可访问；远程查看请通过 SSH 隧道转发 5034 端口。<br>
     二维码包含设备密钥，请勿截图外传。文件传输不经过任何云端中转。
@@ -633,6 +729,24 @@ fetch('/api/device/info').then(function(r){return r.json();}).then(function(d){
 }).catch(function(e){
   document.getElementById('details').innerHTML='<dt>状态</dt><dd>读取失败</dd>';
 });
+
+var ADMIN_TOKEN='__ADMIN_TOKEN__';
+function termRefresh(){
+  fetch('/admin/terminal/status').then(function(r){return r.json();}).then(function(d){
+    var el=document.getElementById('term-state');
+    if(!d.enabled){ el.textContent='已关闭'; return; }
+    if(!d.expiresAt){ el.textContent='已开启（永久）'; return; }
+    el.textContent='已开启，到期 '+new Date(d.expiresAt).toLocaleString();
+  }).catch(function(){ document.getElementById('term-state').textContent='读取失败'; });
+}
+function termEnable(minutes){
+  fetch('/admin/terminal/enable',{method:'POST',headers:{'X-Admin-Token':ADMIN_TOKEN,'Content-Type':'application/json'},
+    body:JSON.stringify({minutes:minutes})}).then(termRefresh);
+}
+function termDisable(){
+  fetch('/admin/terminal/disable',{method:'POST',headers:{'X-Admin-Token':ADMIN_TOKEN}}).then(termRefresh);
+}
+termRefresh();
 </script>
 </body>
 </html>
@@ -641,5 +755,7 @@ fetch('/api/device/info').then(function(r){return r.json();}).then(function(d){
 
 internal sealed record CreateMediaRelayTicketRequest(string Path);
 internal sealed record AudioTranscodeRequest(string Path);
+internal sealed record TerminalExecRequest(string? Command);
+internal sealed record AdminTerminalEnableRequest(int Minutes);
 internal sealed record TrashRestoreRequest(string Id);
 internal sealed record StorageSnapshot(string DriveName, long TotalBytes, long UsedBytes, long FreeBytes);
