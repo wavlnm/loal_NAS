@@ -77,6 +77,7 @@ internal static class Program
         builder.Services.AddSingleton<FileBrowserApiProxy>();
         builder.Services.AddSingleton<MediaRelayService>();
         builder.Services.AddSingleton<VideoThumbnailService>();
+        builder.Services.AddSingleton<AudioTranscodeService>();
         builder.Services.AddSingleton<LinuxFirewallEnsurer>();
         builder.Services.AddSingleton<ConnectedDeviceTracker>();
         builder.Services.AddSingleton<DeviceIdentityService>();
@@ -126,6 +127,59 @@ internal static class Program
         // 带文件名的形式：/api/system/media-open/{ticketId}/{fileName}
         app.MapMethods("/api/system/media-open/{ticketId}/{**fileName}", new[] { HttpMethods.Get, HttpMethods.Head },
             (HttpContext context, string ticketId, string? fileName, MediaRelayService relay) => relay.ProxyMediaAsync(context, ticketId));
+
+        // ── 音频转码兜底（FLAC 等 → MP3，缓存后按 Range 播放） ───────────────────
+        app.MapPost("/api/system/audio-transcode",
+            (HttpContext context, AudioTranscodeRequest request, AudioTranscodeService service) =>
+            {
+                var authToken = context.Request.Headers["X-Auth"].ToString().Trim();
+                if (string.IsNullOrEmpty(authToken))
+                {
+                    return Results.Unauthorized();
+                }
+
+                try
+                {
+                    var info = service.Request(request.Path);
+                    return Results.Ok(new
+                    {
+                        key = info.Key,
+                        status = info.Status,
+                        progress = info.Progress,
+                        error = info.Error,
+                        url = info.Url
+                    });
+                }
+                catch (ArgumentException exception)
+                {
+                    return Results.BadRequest(new { error = "invalid_audio_request", detail = exception.Message });
+                }
+            });
+
+        app.MapGet("/api/system/audio-transcode/status/{key}",
+            (string key, AudioTranscodeService service) =>
+            {
+                var info = service.GetStatus(key);
+                return info is null
+                    ? Results.NotFound()
+                    : Results.Ok(new
+                    {
+                        key = info.Key,
+                        status = info.Status,
+                        progress = info.Progress,
+                        error = info.Error,
+                        url = info.Url
+                    });
+            });
+
+        app.MapGet("/api/system/audio-cache/{key}/{**fileName}",
+            (string key, AudioTranscodeService service) =>
+            {
+                var path = service.ResolveCacheFile(key);
+                return path is null
+                    ? Results.NotFound()
+                    : Results.File(path, "audio/mpeg", enableRangeProcessing: true);
+            });
 
         // ── 视频封面（ffmpeg 抽帧，按文件缓存） ─────────────────────────────────
         app.MapGet("/api/video-thumb",
@@ -586,5 +640,6 @@ fetch('/api/device/info').then(function(r){return r.json();}).then(function(d){
 }
 
 internal sealed record CreateMediaRelayTicketRequest(string Path);
+internal sealed record AudioTranscodeRequest(string Path);
 internal sealed record TrashRestoreRequest(string Id);
 internal sealed record StorageSnapshot(string DriveName, long TotalBytes, long UsedBytes, long FreeBytes);

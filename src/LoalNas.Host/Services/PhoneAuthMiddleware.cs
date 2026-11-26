@@ -63,6 +63,14 @@ public sealed class PhoneAuthMiddleware
             return;
         }
 
+        // 转码缓存文件：播放器无法按请求轮换 nonce，靠不可猜的 key（sha256 前 32 位）保护
+        if (HttpMethods.IsGet(context.Request.Method) &&
+            path.StartsWith("/api/system/audio-cache/", StringComparison.OrdinalIgnoreCase))
+        {
+            await _next(context);
+            return;
+        }
+
         // 预览图与原始媒体读取仍受 FileBrowser 的 X-Auth 保护，放行以免内部组件逐个带 nonce
         if (HttpMethods.IsGet(context.Request.Method) &&
             (path.StartsWith("/api/filebrowser/preview/", StringComparison.OrdinalIgnoreCase) ||
