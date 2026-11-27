@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace LoalNas.Host.Services;
 
@@ -24,6 +25,12 @@ public sealed class PhoneAuthMiddleware
         "/admin",
     };
 
+    // 公网分享页走 token 鉴权，不要求手机端 HMAC 头；只放行严格形状的路径。
+    private static readonly Regex _shareReadPath = new(
+        @"^/s/[A-Za-z0-9_-]{22}(?:/file)?$", RegexOptions.Compiled);
+    private static readonly Regex _shareUnlockPath = new(
+        @"^/s/[A-Za-z0-9_-]{22}/unlock$", RegexOptions.Compiled);
+
     private readonly ConcurrentDictionary<string, long> _seenNonces = new(StringComparer.Ordinal);
     private long _lastCleanupTick = Environment.TickCount64;
 
@@ -43,6 +50,21 @@ public sealed class PhoneAuthMiddleware
         var path = context.Request.Path.Value ?? string.Empty;
 
         if (_bypassPaths.Contains(path))
+        {
+            await _next(context);
+            return;
+        }
+
+        // 公开分享：页面/文件读取（GET/HEAD）与密码解锁（POST）由 token 自身鉴权。
+        if ((HttpMethods.IsGet(context.Request.Method) ||
+             HttpMethods.IsHead(context.Request.Method)) &&
+            _shareReadPath.IsMatch(path))
+        {
+            await _next(context);
+            return;
+        }
+
+        if (HttpMethods.IsPost(context.Request.Method) && _shareUnlockPath.IsMatch(path))
         {
             await _next(context);
             return;

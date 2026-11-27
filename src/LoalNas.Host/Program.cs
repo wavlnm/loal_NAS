@@ -56,6 +56,7 @@ internal static class Program
         builder.Services.Configure<ScreenCaptureOptions>(builder.Configuration.GetSection(ScreenCaptureOptions.SectionName));
         builder.Services.Configure<RemoteTerminalOptions>(builder.Configuration.GetSection(RemoteTerminalOptions.SectionName));
         builder.Services.Configure<MonitorOptions>(builder.Configuration.GetSection(MonitorOptions.SectionName));
+        builder.Services.Configure<ShareOptions>(builder.Configuration.GetSection(ShareOptions.SectionName));
         builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
 
         builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
@@ -94,11 +95,15 @@ internal static class Program
         builder.Services.AddSingleton<DeviceIdentityService>();
         builder.Services.AddSingleton<TrashService>();
         builder.Services.AddHostedService<TrashCleanupService>();
+        builder.Services.AddSingleton<ShareRateLimiter>();
+        builder.Services.AddSingleton<ShareService>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<ShareService>());
 
         var app = builder.Build();
         app.UseMiddleware<IpRateLimitMiddleware>();
         app.UseMiddleware<PhoneAuthMiddleware>();
         MapEndpoints(app);
+        app.MapShareEndpoints();
         return app;
     }
 

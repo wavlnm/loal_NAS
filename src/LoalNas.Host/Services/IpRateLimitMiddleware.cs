@@ -37,6 +37,17 @@ internal sealed class IpRateLimitMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        // 公网分享页有自己的按 token 限流；这里放行，避免大量 Range 请求
+        // 算进同一来源 IP（frp 之后所有访客共享一个内网地址）的封禁桶。
+        var requestPath = context.Request.Path.Value;
+        if (requestPath is not null &&
+            (requestPath == "/s" ||
+             requestPath.StartsWith("/s/", StringComparison.Ordinal)))
+        {
+            await _next(context);
+            return;
+        }
+
         var ip = GetClientIp(context);
 
         // ── 层 2：封禁检查 ───────────────────────────────────────────────────
