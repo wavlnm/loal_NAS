@@ -298,7 +298,6 @@ class Worker:
         tmp = os.path.join(a.ring_dir, '_clip')
         started = time.time()
         clip_path = None
-        score = 0.0
         try:
             shutil.rmtree(tmp, ignore_errors=True)
             os.makedirs(tmp)
@@ -357,6 +356,8 @@ class Worker:
             shutil.rmtree(tmp, ignore_errors=True)
             self.busy = False
             self.hits = 0
+            # 录像期间占用的是高清分支，帧基准已过期，重新取一帧做参考
+            self.prev = None
 
         if clip_path:
             try:

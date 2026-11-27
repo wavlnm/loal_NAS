@@ -207,21 +207,15 @@ public sealed class ScreenCaptureService : IDisposable
         }
     }
 
-    /// <summary>停止指定源的抓取进程（侦测关闭、总开关关闭时用）。</summary>
-    public void Stop(string source)
+    /// <summary>worker 上报的运行参数（宽度/画质），未运行时返回 null。</summary>
+    public (int Width, int Quality)? CameraWorkerState()
     {
-        var channel = IsCamera(source) ? _camera : _desktop;
         lock (_gate)
         {
-            StopWorkerLocked(channel);
+            return _camera.Worker is { HasExited: false }
+                ? (_camera.Width, _camera.Quality)
+                : null;
         }
-    }
-
-    /// <summary>worker 上报的运行参数（宽度/帧率），用于状态接口。</summary>
-    public (int Width, int Quality, bool Running)? CameraWorkerState()
-    {
-        var alive = _camera.Worker is { HasExited: false };
-        return alive ? (_camera.Width, _camera.Quality, true) : null;
     }
 
     private static string SensitivityOrDefault(string? sensitivity) =>

@@ -59,33 +59,16 @@ public sealed class MicLiveStreamService
                 "pw-record --rate " + rate + " --channels 1 - " +
                 "| ffmpeg -hide_banner -loglevel error -f s16le -ar " + rate + " -ac 1 -i - " +
                 "-c:a libmp3lame -b:a " + bitrate + "k -f mp3 -");
-            foreach (var entry in Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>())
-            {
-                if (entry.Key is string key
-                    && (key == "HOME" || key == "PATH")
-                    && !string.IsNullOrWhiteSpace(entry.Value?.ToString()))
-                {
-                    startInfo.Environment[key] = entry.Value?.ToString();
-                }
-            }
-
-            // systemd 服务环境里 XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS 常常是空的，
-            // 而 pw-record 必须靠它们连到用户会话的 PipeWire，所以按 uid 兜底。
-            var runtimeDir = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
-            if (string.IsNullOrWhiteSpace(runtimeDir))
-            {
-                runtimeDir = $"/run/user/{GetUid()}";
-            }
-
+            // 子进程默认继承本进程环境，这里只补 systemd 服务里常缺的两项：
+            // pw-record 必须靠 XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS 才能连上
+            // 用户会话的 PipeWire，缺失时按当前 uid 兜底。
+            var runtimeDir = NonEmpty(Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR"))
+                ?? $"/run/user/{GetUid()}";
             startInfo.Environment["XDG_RUNTIME_DIR"] = runtimeDir;
-            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS")))
+            startInfo.Environment.TryGetValue("DBUS_SESSION_BUS_ADDRESS", out var dbus);
+            if (NonEmpty(dbus) is null)
             {
                 startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"] = $"unix:path={runtimeDir}/bus";
-            }
-            else
-            {
-                startInfo.Environment["DBUS_SESSION_BUS_ADDRESS"] =
-                    Environment.GetEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS");
             }
 
             process = Process.Start(startInfo);
@@ -141,6 +124,9 @@ public sealed class MicLiveStreamService
             Interlocked.Exchange(ref _active, 0);
         }
     }
+
+    private static string? NonEmpty(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value;
 
     [DllImport("libc", EntryPoint = "getuid")]
     private static extern uint GetUid();

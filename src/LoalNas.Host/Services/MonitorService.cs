@@ -23,8 +23,7 @@ public sealed class MonitorService : BackgroundService
         string Name,
         string RelativePath,
         long SizeBytes,
-        DateTimeOffset ModifiedAt,
-        string PlayPath);
+        DateTimeOffset ModifiedAt);
 
     private readonly ILogger<MonitorService> _logger;
     private readonly MonitorOptions _options;
@@ -116,7 +115,7 @@ public sealed class MonitorService : BackgroundService
     {
         var worker = ReadState();
         var camera = _capture.CameraWorkerState();
-        var today = ListClips(null);
+        var todayClips = ListClips(null);
         return new
         {
             enabled = _options.Enabled,
@@ -151,7 +150,7 @@ public sealed class MonitorService : BackgroundService
                     sourceResolution = SizeOf(worker, "sourceResolution"),
                     explicitCaps = BoolOf(worker, "explicitCaps"),
                 },
-            clipsToday = today.Count,
+            clipsToday = todayClips.Count,
             clipFolder = ClipRootResourcePath,
             listen = new { enabled = _options.ListenEnabled },
         };
@@ -243,8 +242,7 @@ public sealed class MonitorService : BackgroundService
                     name,
                     $"{ClipRootResourcePath}/{day}/{name}",
                     info.Length,
-                    new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero),
-                    $"{ClipRootResourcePath}/{day}/{name}"));
+                    new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero)));
             }
         }
         catch (Exception ex)
@@ -323,22 +321,14 @@ public sealed class MonitorService : BackgroundService
         }
     }
 
-    /// <summary>侦测开着就得让摄像头进程常驻，关掉就交给空闲停止逻辑。</summary>
+    /// <summary>
+    /// 侦测开着就让摄像头进程常驻；关掉时不硬掐——正在取图的请求会被打断，
+    /// 交给 ScreenCaptureService 的空闲停止逻辑在 IdleSeconds 后收尾。
+    /// </summary>
     private void ApplyKeepAlive()
     {
-        if (!_options.Enabled)
-        {
-            _capture.EnsureCameraChannelAlive(false);
-            return;
-        }
-
         var (enabled, _) = Detect;
-        _capture.EnsureCameraChannelAlive(enabled);
-        if (!enabled)
-        {
-            // 侦测关闭后不再需要常驻，但也不必强行掐掉正在取图的进程，
-            // 空闲停止逻辑会在 IdleSeconds 后收尾。
-        }
+        _capture.EnsureCameraChannelAlive(_options.Enabled && enabled);
     }
 
     private void MoveExpiredClips(string today)
@@ -393,13 +383,10 @@ public sealed class MonitorService : BackgroundService
             using var stream = File.OpenRead(MonitorPaths.SettingsFile);
             using var document = JsonDocument.Parse(stream);
             var root = document.RootElement;
-            if (root.TryGetProperty("detectEnabled", out var enabled) && enabled.ValueKind == JsonValueKind.True)
+            if (root.TryGetProperty("detectEnabled", out var enabled)
+                && enabled.ValueKind is JsonValueKind.True or JsonValueKind.False)
             {
-                _detectEnabled = true;
-            }
-            else if (enabled.ValueKind == JsonValueKind.False)
-            {
-                _detectEnabled = false;
+                _detectEnabled = enabled.GetBoolean();
             }
 
             if (root.TryGetProperty("sensitivity", out var sens))
