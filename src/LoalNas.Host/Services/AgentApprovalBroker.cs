@@ -40,6 +40,7 @@ public sealed class AgentApprovalBroker
     private readonly IOptions<AgentOptions> _options;
     private readonly SensitiveCommandPolicy _policy;
     private readonly AgentPolicyStore _mode;
+    private readonly PrivacyService _privacy;
     private readonly AgentServeManager _serve;
     private readonly ConcurrentDictionary<string, Pending> _pending = new(StringComparer.Ordinal);
     private readonly object _auditLock = new();
@@ -49,12 +50,14 @@ public sealed class AgentApprovalBroker
         IOptions<AgentOptions> options,
         SensitiveCommandPolicy policy,
         AgentPolicyStore mode,
+        PrivacyService privacy,
         AgentServeManager serve)
     {
         _logger = logger;
         _options = options;
         _policy = policy;
         _mode = mode;
+        _privacy = privacy;
         _serve = serve;
     }
 
@@ -85,6 +88,16 @@ public sealed class AgentApprovalBroker
         string? command, string? cwd, CancellationToken cancellationToken)
     {
         var sessionId = _serve.CurrentSessionId;
+
+        // 隐私目录是硬拒绝，不能靠自主模式绕过。
+        if (_privacy.IsPrivacyCommand(command))
+        {
+            await AuditAsync(
+                sessionId, command, cwd, true, "privacy", ".private", false,
+                "deny", "privacy_block", 0, "privacy_directory").ConfigureAwait(false);
+            return (false, "privacy_directory");
+        }
+
         var verdict = _policy.Evaluate(command);
 
         // 完全自主模式：不再弹确认，所有命令直接放行。

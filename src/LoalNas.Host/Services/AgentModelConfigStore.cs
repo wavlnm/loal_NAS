@@ -29,14 +29,17 @@ public sealed class AgentModelConfigStore
 
     private readonly ILogger<AgentModelConfigStore> _logger;
     private readonly IOptions<AgentOptions> _options;
+    private readonly PrivacyService _privacy;
     private readonly object _lock = new();
     private AgentModelConfig? _config;
 
     public AgentModelConfigStore(
-        ILogger<AgentModelConfigStore> logger, IOptions<AgentOptions> options)
+        ILogger<AgentModelConfigStore> logger, IOptions<AgentOptions> options,
+        PrivacyService privacy)
     {
         _logger = logger;
         _options = options;
+        _privacy = privacy;
         AgentPaths.EnsureDirectories();
         Load();
         if (IsConfigured)
@@ -215,6 +218,18 @@ public sealed class AgentModelConfigStore
                 {
                     ["action"] = "read",
                     ["resource"] = loalDataRoot + "/*",
+                    ["effect"] = "deny",
+                },
+                new Dictionary<string, object?>
+                {
+                    ["action"] = "read",
+                    ["resource"] = _privacy.PrivateDirectory,
+                    ["effect"] = "deny",
+                },
+                new Dictionary<string, object?>
+                {
+                    ["action"] = "read",
+                    ["resource"] = _privacy.PrivateDirectory + "/*",
                     ["effect"] = "deny",
                 },
                 new Dictionary<string, object?>

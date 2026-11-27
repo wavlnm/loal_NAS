@@ -59,6 +59,7 @@ internal static class Program
         builder.Services.Configure<ShareOptions>(builder.Configuration.GetSection(ShareOptions.SectionName));
         builder.Services.Configure<ArchiveOptions>(builder.Configuration.GetSection(ArchiveOptions.SectionName));
         builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection(AgentOptions.SectionName));
+        builder.Services.Configure<PrivacyOptions>(builder.Configuration.GetSection(PrivacyOptions.SectionName));
         builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
 
         builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
@@ -102,6 +103,7 @@ internal static class Program
         builder.Services.AddHostedService(services => services.GetRequiredService<ShareService>());
         builder.Services.AddSingleton<ArchiveService>();
         builder.Services.AddHostedService(services => services.GetRequiredService<ArchiveService>());
+        builder.Services.AddSingleton<PrivacyService>();
         builder.Services.AddSingleton<AgentModelConfigStore>();
         builder.Services.AddSingleton<SensitiveCommandPolicy>();
         builder.Services.AddSingleton<AgentServeManager>();
@@ -117,6 +119,7 @@ internal static class Program
         app.MapShareEndpoints();
         app.MapArchiveEndpoints();
         app.MapAgentEndpoints();
+        app.MapPrivacyEndpoints();
         return app;
     }
 
