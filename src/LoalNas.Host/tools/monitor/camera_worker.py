@@ -11,8 +11,10 @@
 一条 gstreamer 管道、tee 两路，避免两个进程抢同一个 /dev/video0：
   A 预览：解码 -> 缩放到 preview-width -> jpegenc -> multifilesink(max-files=3)
         手机端取图就读这三张里最新的一张，移动侦测也用同一批帧。
-  B 高清环形：原始 MJPEG 帧直接落盘（max-files 限制为 record-seconds 帧数），
+  B 高清环形：原始 MJPEG 帧直接落盘（max-files 按 30fps 预留 record-seconds 秒），
         等于滚动保留"最近 N 秒"的高清画面，触发时不用重开管道。
+        这一路不做限帧，落盘帧率就是摄像头的真实出帧率（多为 25/30fps），
+        合成 MP4 时必须用实测帧率，否则播放速度会整体变慢或变快。
 
 移动侦测在 Python 里用 PIL 做帧差（缩到 160x90 灰度，均值差 + 变化像素占比
 双阈值，连续 3 次确认，之后进入冷却）。触发后录 record-seconds 秒：
@@ -56,6 +58,9 @@ SENSITIVITY = {
 }
 DIFF_SIZE = (160, 90)
 DIFF_CUT = 24  # 灰度差超过这个值才算"变化像素"
+# UVC 摄像头 MJPEG 的常见出帧率上限；环形缓冲按它预留容量（合成时用实测帧率），
+# 避免默认 --ring-fps 10 时缓冲只够存三分之一时长的画面。
+RING_PLAN_FPS = 30
 
 
 def on_term(signum, frame):
@@ -206,8 +211,8 @@ class Worker:
             self._last_index, self._last_index_time = idx, now
 
     def ring_size(self):
-        fps = max(5, self.args.ring_fps)
-        return int(self.args.record_seconds * fps) + fps
+        # 环形保留 record-seconds 秒画面；按 30fps 上限预留才能覆盖摄像头原生帧率
+        return int(self.args.record_seconds * RING_PLAN_FPS) + RING_PLAN_FPS
 
     def stop_pipeline(self):
         gst = getattr(self, 'gst', None)
@@ -322,10 +327,11 @@ class Worker:
                 except subprocess.TimeoutExpired:
                     rec.kill()
 
-            frames = self.snapshot_ring(tmp, since=started)
+            frames, clip_fps = self.snapshot_ring(tmp, since=started)
             if frames == 0:
                 print('no hd frames, skip clip', file=sys.stderr, flush=True)
                 return
+            clip_fps = min(60.0, max(1.0, clip_fps))
 
             date = time.strftime('%Y-%m-%d')
             hhmmss = time.strftime('%H%M%S', time.localtime(started))
@@ -334,7 +340,7 @@ class Worker:
             clip_path = os.path.join(folder, f'{hhmmss}_{kind}.mp4')
 
             cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
-                   '-framerate', str(a.ring_fps), '-i',
+                   '-framerate', f'{clip_fps:.3f}', '-i',
                    os.path.join(tmp, 'seq_%08d.jpg')]
             if rec is not None and os.path.exists(audio) and os.path.getsize(audio) > 1000:
                 cmd += ['-i', audio]
@@ -377,27 +383,41 @@ class Worker:
                   file=sys.stderr, flush=True)
 
     def snapshot_ring(self, tmp, since=None):
-        """把环形帧复制成从 1 开始的连续序列（ffmpeg 需要无缺口序列）。
+        """把环形帧复制成从 1 开始的连续序列，返回 (帧数, 实测帧率)。
 
         since 之后的帧才算本次事件，避免把上一轮残留的旧帧剪进片段。
+        环形这一路不做限帧，落盘帧率就是摄像头真实出帧率（常见 25/30fps），
+        用首尾帧落盘时间的跨度估帧率，交给 ffmpeg 后播放速度才与现实一致。
         """
         names = []
+        stamps = {}
         for name in sorted(n for n in os.listdir(self.args.ring_dir)
                            if n.startswith('h_') and n.endswith('.jpg')):
             path = os.path.join(self.args.ring_dir, name)
-            if since is not None and os.stat(path).st_mtime < since:
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                continue
+            if since is not None and mtime < since:
                 continue
             names.append(name)
-        keep = int(max(1, self.args.record_seconds) * max(5, self.args.ring_fps))
+            stamps[name] = mtime
+        fps = max(5.0, float(self.args.ring_fps))
+        if len(names) >= 2 and stamps[names[-1]] > stamps[names[0]]:
+            fps = (len(names) - 1) / (stamps[names[-1]] - stamps[names[0]])
+        keep = int(max(1, self.args.record_seconds) * fps) + 2
         if len(names) > keep:
             names = names[-keep:]
+            span = stamps[names[-1]] - stamps[names[0]]
+            if span > 0:
+                fps = (len(names) - 1) / span
         for idx, name in enumerate(names, start=1):
             try:
                 shutil.copyfile(os.path.join(self.args.ring_dir, name),
                                 os.path.join(tmp, f'seq_{idx:08d}.jpg'))
             except OSError:
-                return idx - 1
-        return len(names)
+                return idx - 1, fps
+        return len(names), fps
 
     # ---------- 指令与状态 ----------
 
