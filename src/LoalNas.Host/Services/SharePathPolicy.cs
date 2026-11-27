@@ -36,9 +36,15 @@ public static class SharePathPolicy
     }
 
     public static bool TryResolveFile(
-        string root, string? resourcePath, out string fullPath, out ResolveError error)
+        string root, string? resourcePath, out string fullPath, out ResolveError error) =>
+        TryResolve(root, resourcePath, allowDirectory: false, out fullPath, out _, out error);
+
+    public static bool TryResolve(
+        string root, string? resourcePath, bool allowDirectory,
+        out string fullPath, out bool isDirectory, out ResolveError error)
     {
         fullPath = "";
+        isDirectory = false;
         error = ResolveError.None;
 
         var normalized = Normalize(resourcePath);
@@ -105,13 +111,22 @@ public static class SharePathPolicy
             }
 
             var attributes = File.GetAttributes(current);
-            if (attributes.HasFlag(FileAttributes.Directory))
+            isDirectory = attributes.HasFlag(FileAttributes.Directory);
+            if (isDirectory)
             {
-                error = ResolveError.DirectoryNotAllowed;
-                return false;
-            }
+                if (!allowDirectory)
+                {
+                    error = ResolveError.DirectoryNotAllowed;
+                    return false;
+                }
 
-            if (!File.Exists(current))
+                if (!Directory.Exists(current))
+                {
+                    error = ResolveError.FileNotFound;
+                    return false;
+                }
+            }
+            else if (!File.Exists(current))
             {
                 error = ResolveError.FileNotFound;
                 return false;

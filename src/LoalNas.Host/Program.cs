@@ -57,6 +57,7 @@ internal static class Program
         builder.Services.Configure<RemoteTerminalOptions>(builder.Configuration.GetSection(RemoteTerminalOptions.SectionName));
         builder.Services.Configure<MonitorOptions>(builder.Configuration.GetSection(MonitorOptions.SectionName));
         builder.Services.Configure<ShareOptions>(builder.Configuration.GetSection(ShareOptions.SectionName));
+        builder.Services.Configure<ArchiveOptions>(builder.Configuration.GetSection(ArchiveOptions.SectionName));
         builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
 
         builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
@@ -98,12 +99,15 @@ internal static class Program
         builder.Services.AddSingleton<ShareRateLimiter>();
         builder.Services.AddSingleton<ShareService>();
         builder.Services.AddHostedService(services => services.GetRequiredService<ShareService>());
+        builder.Services.AddSingleton<ArchiveService>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<ArchiveService>());
 
         var app = builder.Build();
         app.UseMiddleware<IpRateLimitMiddleware>();
         app.UseMiddleware<PhoneAuthMiddleware>();
         MapEndpoints(app);
         app.MapShareEndpoints();
+        app.MapArchiveEndpoints();
         return app;
     }
 
@@ -640,7 +644,7 @@ internal static class Program
         const long surplusBytes = 100 * 1024 * 1024L;
         try
         {
-            var drive = ResolveDrive(sharedRootPath);
+            var drive = DiskSpaceProbe.ResolveDrive(sharedRootPath);
             if (drive is null || !drive.IsReady)
             {
                 return false;
@@ -676,51 +680,11 @@ internal static class Program
         }
     }
 
-    /// <summary>
-    /// Linux 上 Path.GetPathRoot 对任意绝对路径都返回 "/"，无法反映真实挂载点。
-    /// 这里用已挂载文件系统的挂载点做最长前缀匹配，找到路径实际所在的磁盘。
-    /// </summary>
-    private static DriveInfo? ResolveDrive(string path)
-    {
-        string full;
-        try
-        {
-            full = Path.GetFullPath(path);
-        }
-        catch
-        {
-            return null;
-        }
-
-        var mounts = DriveInfo.GetDrives()
-            .Where(d => d.IsReady)
-            .Select(d => d.Name)
-            .OrderByDescending(n => n.Length);
-
-        foreach (var mount in mounts)
-        {
-            var prefix = mount.EndsWith('/') ? mount : mount + "/";
-            if (full == mount || full.StartsWith(prefix, StringComparison.Ordinal))
-            {
-                try
-                {
-                    return new DriveInfo(mount);
-                }
-                catch
-                {
-                    // 忽略不可访问的挂载点
-                }
-            }
-        }
-
-        return null;
-    }
-
     private static StorageSnapshot? TryCreateStorageSnapshot(string sharedRootPath)
     {
         try
         {
-            var driveInfo = ResolveDrive(sharedRootPath);
+            var driveInfo = DiskSpaceProbe.ResolveDrive(sharedRootPath);
             if (driveInfo is null || !driveInfo.IsReady)
             {
                 return null;
