@@ -13,6 +13,7 @@ public static class AgentEndpoints
     private sealed record CreateSessionRequest(string? Title);
     private sealed record PromptRequest(string? Text);
     private sealed record ApprovalDecisionRequest(string? Decision);
+    private sealed record QuestionAnswerRequest(JsonElement? Answer);
     private sealed record ModelUpdateRequest(
         string? ProviderId, string? BaseUrl, string? Model, string? ApiKey, bool ClearKey);
     private sealed record PluginApprovalRequest(string? Command, string? Cwd, string? Kind);
@@ -108,12 +109,14 @@ public static class AgentEndpoints
                 var info = await sessions.GetSessionAsync(id, ct);
                 var messages = await sessions.GetMessagesAsync(
                     id, options.Value.MessageListLimit, ct);
+                var forms = await TryListFormsAsync(sessions, id, ct);
                 return Results.Ok(new
                 {
                     session = MapSession(
                         info.TryGetProperty("data", out var data) ? data : info, active),
                     messages = MapMessages(messages),
                     pendingApproval = approvals.GetPending(id),
+                    pendingQuestion = MapPendingQuestion(forms),
                 });
             }
             catch (AgentUnavailableException ex)
@@ -188,6 +191,18 @@ public static class AgentEndpoints
             try
             {
                 approvals.CancelSession(id, "user_interrupt");
+                var forms = await TryListFormsAsync(sessions, id, ct);
+                foreach (var formId in QuestionFormIds(forms))
+                {
+                    try
+                    {
+                        await sessions.CancelFormAsync(id, formId, "用户中断了任务", ct);
+                    }
+                    catch (AgentUnavailableException)
+                    {
+                        // 中断流程以 Interrupt 为准，取消 form 只是顺带清理。
+                    }
+                }
                 await sessions.InterruptAsync(id, ct);
                 return Results.Ok(new { interrupted = true });
             }
@@ -224,6 +239,75 @@ public static class AgentEndpoints
             return approvals.Decide(id, approvalId, allow, out var error)
                 ? Results.Ok(new { decided = true, allow })
                 : Results.Json(new { error = error ?? "approval_failed" }, statusCode: 404);
+        });
+
+        app.MapPost("/api/agent/sessions/{sessionId}/questions/{formId}", async (
+            string sessionId, string formId, HttpContext context,
+            AgentServeManager serve, AgentSessionProxy sessions, CancellationToken ct) =>
+        {
+            var id = AgentSessionProxy.ValidateSessionId(sessionId);
+            var fid = AgentSessionProxy.ValidateFormId(formId);
+            if (id is null)
+            {
+                return BadRequest("invalid_session");
+            }
+            if (fid is null)
+            {
+                return BadRequest("invalid_form");
+            }
+
+            var request = await ReadJsonAsync<QuestionAnswerRequest>(context, ct);
+            if (request?.Answer is not { ValueKind: JsonValueKind.Object } answer ||
+                !IsValidQuestionAnswer(answer))
+            {
+                return BadRequest("invalid_answer");
+            }
+
+            if (!await TryEnsureRunningAsync(serve, ct))
+            {
+                return AgentUnavailable(serve);
+            }
+
+            try
+            {
+                await sessions.ReplyFormAsync(id, fid, answer, ct);
+                return Results.Ok(new { answered = true });
+            }
+            catch (AgentUnavailableException ex)
+            {
+                return AgentError(ex);
+            }
+        });
+
+        app.MapDelete("/api/agent/sessions/{sessionId}/questions/{formId}", async (
+            string sessionId, string formId, AgentServeManager serve,
+            AgentSessionProxy sessions, CancellationToken ct) =>
+        {
+            var id = AgentSessionProxy.ValidateSessionId(sessionId);
+            var fid = AgentSessionProxy.ValidateFormId(formId);
+            if (id is null)
+            {
+                return BadRequest("invalid_session");
+            }
+            if (fid is null)
+            {
+                return BadRequest("invalid_form");
+            }
+
+            if (!await TryEnsureRunningAsync(serve, ct))
+            {
+                return AgentUnavailable(serve);
+            }
+
+            try
+            {
+                await sessions.CancelFormAsync(id, fid, "用户跳过了本次提问", ct);
+                return Results.Ok(new { cancelled = true });
+            }
+            catch (AgentUnavailableException ex)
+            {
+                return AgentError(ex);
+            }
         });
 
         app.MapGet("/api/agent/model", (AgentModelConfigStore store) =>
@@ -404,6 +488,215 @@ public static class AgentEndpoints
         });
     }
 
+    private static bool IsValidQuestionAnswer(JsonElement answer)
+    {
+        if (answer.GetRawText().Length > 16 * 1024)
+        {
+            return false;
+        }
+
+        var count = 0;
+        foreach (var property in answer.EnumerateObject())
+        {
+            count++;
+            if (count > 32)
+            {
+                return false;
+            }
+
+            var value = property.Value;
+            if (value.ValueKind == JsonValueKind.String)
+            {
+                if ((value.GetString()?.Length ?? 0) > 2000)
+                {
+                    return false;
+                }
+                continue;
+            }
+
+            if (value.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            var items = 0;
+            foreach (var item in value.EnumerateArray())
+            {
+                items++;
+                if (items > 20 || item.ValueKind != JsonValueKind.String ||
+                    (item.GetString()?.Length ?? 0) > 500)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return count > 0;
+    }
+
+    private static async Task<JsonElement?> TryListFormsAsync(
+        AgentSessionProxy sessions, string sessionId, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            return await sessions.ListFormsAsync(sessionId, timeout.Token);
+        }
+        catch (AgentUnavailableException)
+        {
+            return null;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsQuestionForm(JsonElement form) =>
+        form.ValueKind == JsonValueKind.Object &&
+        form.TryGetProperty("metadata", out var metadata) &&
+        metadata.ValueKind == JsonValueKind.Object &&
+        metadata.TryGetProperty("kind", out var kind) &&
+        kind.ValueKind == JsonValueKind.String &&
+        kind.GetString() == "question";
+
+    private static IEnumerable<string> QuestionFormIds(JsonElement? root)
+    {
+        if (root is not { } forms ||
+            !forms.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Array)
+        {
+            yield break;
+        }
+
+        foreach (var form in data.EnumerateArray())
+        {
+            if (!IsQuestionForm(form))
+            {
+                continue;
+            }
+
+            var id = form.TryGetProperty("id", out var idValue)
+                ? idValue.GetString()
+                : null;
+            if (AgentSessionProxy.ValidateFormId(id) is { } formId)
+            {
+                yield return formId;
+            }
+        }
+    }
+
+    private static object? MapPendingQuestion(JsonElement? root)
+    {
+        if (root is not { } forms ||
+            !forms.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var form in data.EnumerateArray())
+        {
+            if (!IsQuestionForm(form))
+            {
+                continue;
+            }
+
+            var formId = form.TryGetProperty("id", out var idValue)
+                ? idValue.GetString()
+                : null;
+            if (AgentSessionProxy.ValidateFormId(formId) is null)
+            {
+                continue;
+            }
+
+            var title = form.TryGetProperty("title", out var titleValue)
+                ? titleValue.GetString()
+                : null;
+            var questions = new List<object>();
+            if (form.TryGetProperty("fields", out var fields) &&
+                fields.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var field in fields.EnumerateArray())
+                {
+                    var key = field.TryGetProperty("key", out var keyValue)
+                        ? keyValue.GetString()
+                        : null;
+                    if (string.IsNullOrWhiteSpace(key))
+                    {
+                        continue;
+                    }
+
+                    var header = field.TryGetProperty("title", out var headerValue)
+                        ? headerValue.GetString()
+                        : null;
+                    var question = field.TryGetProperty("description", out var descValue)
+                        ? descValue.GetString()
+                        : null;
+                    var type = field.TryGetProperty("type", out var typeValue)
+                        ? typeValue.GetString()
+                        : null;
+                    var options = new List<object>();
+                    if (field.TryGetProperty("options", out var optionArray) &&
+                        optionArray.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var option in optionArray.EnumerateArray())
+                        {
+                            var value = option.TryGetProperty("value", out var valueValue)
+                                ? valueValue.GetString()
+                                : null;
+                            if (value is null)
+                            {
+                                continue;
+                            }
+                            var label = option.TryGetProperty("label", out var labelValue)
+                                ? labelValue.GetString()
+                                : null;
+                            var description = option.TryGetProperty(
+                                "description", out var optionDesc)
+                                ? optionDesc.GetString()
+                                : null;
+                            options.Add(new
+                            {
+                                value,
+                                label = label ?? value,
+                                description,
+                            });
+                        }
+                    }
+
+                    questions.Add(new
+                    {
+                        key,
+                        header = header ?? "",
+                        question = question ?? "",
+                        multiple = type == "multiselect",
+                        custom = field.TryGetProperty("custom", out var custom) &&
+                            custom.ValueKind == JsonValueKind.True,
+                        required = field.TryGetProperty("required", out var required) &&
+                            required.ValueKind == JsonValueKind.True,
+                        options,
+                    });
+                }
+            }
+
+            if (questions.Count == 0)
+            {
+                continue;
+            }
+
+            return new
+            {
+                formId,
+                title = string.IsNullOrWhiteSpace(title) ? "需要你的回答" : title,
+                questions,
+            };
+        }
+
+        return null;
+    }
+
     private static async Task<bool> TryEnsureRunningAsync(
         AgentServeManager serve, CancellationToken ct)
     {
@@ -431,7 +724,11 @@ public static class AgentEndpoints
         {
             "model_not_configured" => 409,
             "invalid_session" => 400,
+            "invalid_form" => 400,
+            "invalid_answer" => 400,
             "session_not_found" => 404,
+            "question_not_found" => 404,
+            "question_expired" => 409,
             "opencode_error" => 502,
             _ => 503,
         };

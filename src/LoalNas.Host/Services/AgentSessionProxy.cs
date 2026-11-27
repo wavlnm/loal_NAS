@@ -78,6 +78,43 @@ public sealed class AgentSessionProxy
         return await ReadAsync(response, ct).ConfigureAwait(false);
     }
 
+    public async Task<JsonElement> ListFormsAsync(string sessionId, CancellationToken ct)
+    {
+        using var response = await _serve.SendAsync(
+            HttpMethod.Get, $"/api/session/{SessionId(sessionId)}/form", null, ct)
+            .ConfigureAwait(false);
+        return await ReadAsync(response, ct).ConfigureAwait(false);
+    }
+
+    public async Task ReplyFormAsync(
+        string sessionId, string formId, JsonElement answer, CancellationToken ct)
+    {
+        var body = JsonSerializer.Serialize(new { answer });
+        using var response = await _serve.SendAsync(
+            HttpMethod.Post,
+            $"/api/session/{SessionId(sessionId)}/form/{FormId(formId)}/reply",
+            body, ct).ConfigureAwait(false);
+        await EnsureFormSuccessAsync(response, ct).ConfigureAwait(false);
+    }
+
+    public async Task CancelFormAsync(
+        string sessionId, string formId, string message, CancellationToken ct)
+    {
+        var query = Uri.EscapeDataString(message);
+        using var response = await _serve.SendAsync(
+            HttpMethod.Delete,
+            $"/api/session/{SessionId(sessionId)}/form/{FormId(formId)}?message={query}",
+            null, ct).ConfigureAwait(false);
+        await EnsureFormSuccessAsync(response, ct).ConfigureAwait(false);
+    }
+
+    public static string? ValidateFormId(string? formId) =>
+        formId is { Length: >= 4 and < 140 } &&
+        formId.StartsWith("frm_", StringComparison.Ordinal) &&
+        formId.All(c => char.IsLetterOrDigit(c) || c is '_' or '-')
+            ? formId
+            : null;
+
     public static string? ValidateSessionId(string? sessionId) =>
         sessionId is { Length: > 3 and < 140 } &&
         sessionId.StartsWith("ses", StringComparison.Ordinal) &&
@@ -88,6 +125,10 @@ public sealed class AgentSessionProxy
     private static string SessionId(string sessionId) =>
         ValidateSessionId(sessionId) ?? throw new AgentUnavailableException(
             "invalid_session", "无效的会话 ID。");
+
+    private static string FormId(string formId) =>
+        ValidateFormId(formId) ?? throw new AgentUnavailableException(
+            "invalid_form", "无效的提问 ID。");
 
     private static async Task<JsonElement> ReadAsync(
         HttpResponseMessage response, CancellationToken ct)
@@ -121,6 +162,25 @@ public sealed class AgentSessionProxy
         {
             throw new AgentUnavailableException(
                 "opencode_error",
+                $"OpenCode 返回 {(int)response.StatusCode}：{Trim(text)}");
+        }
+    }
+
+    private static async Task EnsureFormSuccessAsync(
+        HttpResponseMessage response, CancellationToken ct)
+    {
+        var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            var code = response.StatusCode switch
+            {
+                System.Net.HttpStatusCode.NotFound => "question_not_found",
+                System.Net.HttpStatusCode.Conflict or System.Net.HttpStatusCode.Gone
+                    => "question_expired",
+                _ => "opencode_error",
+            };
+            throw new AgentUnavailableException(
+                code,
                 $"OpenCode 返回 {(int)response.StatusCode}：{Trim(text)}");
         }
     }
