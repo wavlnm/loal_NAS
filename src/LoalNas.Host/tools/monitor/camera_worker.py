@@ -6,20 +6,24 @@
       --preview-quality 60 --preview-fps 8 --out-dir ~/.cache/loalnas/camera \
       --ring-dir ~/.cache/loalnas/camera-hd --state-file ... --cmd-file ... \
       --clip-dir-base /mnt/HDD-Data/loal-nas/file/监控录像 \
-      --detect 1 --sensitivity mid --record-seconds 10 --cooldown-seconds 30
+      --detect 1 --sensitivity mid --record-seconds 10 \
+      --quiet-seconds 5 --max-segment-seconds 60 --cooldown-seconds 0
 
 一条 gstreamer 管道、tee 两路，避免两个进程抢同一个 /dev/video0：
   A 预览：解码 -> 缩放到 preview-width -> jpegenc -> multifilesink(max-files=3)
         手机端取图就读这三张里最新的一张，移动侦测也用同一批帧。
-  B 高清环形：原始 MJPEG 帧直接落盘（max-files 按 30fps 预留 record-seconds 秒），
-        等于滚动保留"最近 N 秒"的高清画面，触发时不用重开管道。
-        这一路不做限帧，落盘帧率就是摄像头的真实出帧率（多为 25/30fps），
-        合成 MP4 时必须用实测帧率，否则播放速度会整体变慢或变快。
+  B 高清环形：原始 MJPEG 帧直接落盘（max-files 按 30fps 预留
+        max-segment-seconds + quiet-seconds + 余量），等于滚动保留"最近 N 秒"
+        的高清画面，触发时不用重开管道。这一路不做限帧，落盘帧率就是摄像头的
+        真实出帧率（多为 25/30fps），合成 MP4 时必须用实测帧率，否则播放速度
+        会整体变慢或变快。
 
 移动侦测在 Python 里用 PIL 做帧差（缩到 160x90 灰度，均值差 + 变化像素占比
-双阈值，连续 3 次确认，之后进入冷却）。触发后录 record-seconds 秒：
-环形高清帧 + pw-record 录的音轨，交给 ffmpeg 合成 faststart MP4，
-写到 clip-dir-base/YYYY-MM-DD/HHMMSS_auto.mp4（手动录的是 _manual.mp4）。
+双阈值，连续 3 次确认）。触发后持续录制：连续 quiet-seconds 秒没有运动才结束；
+单段达到 max-segment-seconds 秒仍有运动时自动分片，下一段接着录。
+环形高清帧 + 每段独立 pw-record 音轨，交给 ffmpeg 合成 faststart MP4，
+写到 clip-dir-base/YYYY-MM-DD/HHMMSS_auto.mp4（手动录的是 _manual.mp4，
+仍固定 record-seconds 秒）。
 
 控制走文件，避免常驻进程和 web 进程之间的复杂 IPC：
   cmd-file   服务端写：{"detect":bool,"sensitivity":"low|mid|high","manual":int}
@@ -31,6 +35,7 @@
 import argparse
 import json
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -108,18 +113,39 @@ def clean_dir(path, prefix):
             pass
 
 
+def clean_clip_dirs(path):
+    """清掉异常退出遗留的分段临时目录。"""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith('_clip'):
+            continue
+        item = os.path.join(path, name)
+        if os.path.isdir(item):
+            shutil.rmtree(item, ignore_errors=True)
+
+
 class Worker:
     def __init__(self, args):
         self.args = args
         self.detect_enabled = bool(args.detect)
         self.sensitivity = args.sensitivity
         self.manual_token = 0
-        self.busy = False           # 正在录制一段事件
+        self.busy = False           # 正在录制事件/手动片段
         self.motion_active = False
         self.last_trigger = 0.0
         self.events = []            # 今日事件（内存里维护，同时落 state）
         self.events_date = self.today()
         self.hits = 0
+        # 跨线程共享的状态（检测线程更新运动时间，事件线程读取并决定何时结束）
+        self.state_lock = threading.Lock()
+        self.last_motion_at = 0.0
+        self.event_active = False
+        self.segment_index = 0
+        self.segment_started_at = 0.0
+        self._encode_queue = queue.Queue()
         self.last_score = 0.0
         self.last_mean = 0.0
         self.used_caps = True
@@ -211,8 +237,10 @@ class Worker:
             self._last_index, self._last_index_time = idx, now
 
     def ring_size(self):
-        # 环形保留 record-seconds 秒画面；按 30fps 上限预留才能覆盖摄像头原生帧率
-        return int(self.args.record_seconds * RING_PLAN_FPS) + RING_PLAN_FPS
+        # 覆盖一个最长分段 + 静止判定窗口 + 快照/编码余量；
+        # 按 30fps 上限预留才能覆盖摄像头原生帧率。
+        seconds = (self.args.max_segment_seconds + self.args.quiet_seconds + 5)
+        return int(seconds * RING_PLAN_FPS) + RING_PLAN_FPS
 
     def stop_pipeline(self):
         gst = getattr(self, 'gst', None)
@@ -254,8 +282,8 @@ class Worker:
             if not self.detect_enabled or Image is None:
                 self.hits = 0
                 continue
-            if self.busy:
-                continue
+            # 录像期间也要继续检测：事件循环靠 last_motion_at 判断何时静止，
+            # 不能像以前那样 busy 就跳过整轮。
             path = self.newest_frame()
             if not path:
                 continue
@@ -282,110 +310,242 @@ class Worker:
                 else:
                     self.hits = 0
                 self.motion_active = self.hits >= self.args.confirm_hits
+                if self.motion_active:
+                    with self.state_lock:
+                        self.last_motion_at = now
 
             self.prev = gray
-            if self.motion_active and now - self.last_trigger >= self.args.cooldown_seconds:
+            if (self.motion_active and not self.busy
+                    and now - self.last_trigger >= self.args.cooldown_seconds):
                 self.last_trigger = now
                 self.trigger('auto')
 
     def trigger(self, kind):
-        """录一段事件视频（阻塞式，期间侦测暂停）。"""
-        threading.Thread(target=self.record, args=(kind,),
-                         daemon=True).start()
+        """认领一次录制；busy 必须在起线程前设置，避免检测线程重复触发。"""
+        now = time.time()
+        with self.state_lock:
+            if self.busy:
+                return
+            self.busy = True
+            self.segment_started_at = now
+            if kind == 'auto':
+                self.event_active = True
+                self.last_motion_at = now
+                self.segment_index = 1
+        target = self.record_event if kind == 'auto' else self.record_manual
+        threading.Thread(target=target, args=(now,), daemon=True).start()
 
     # ---------- 录像 ----------
 
-    def record(self, kind):
-        if self.busy:
-            return
-        self.busy = True
-        a = self.args
-        tmp = os.path.join(a.ring_dir, '_clip')
-        started = time.time()
-        clip_path = None
+    def _start_audio(self, tmp):
+        audio = os.path.join(tmp, 'a.wav')
+        if self.args.no_audio:
+            return audio, None
         try:
-            shutil.rmtree(tmp, ignore_errors=True)
-            os.makedirs(tmp)
+            rec = subprocess.Popen(
+                ['pw-record', '--rate', '16000', '--channels', '1', audio],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            return audio, None
+        return audio, rec
 
-            # 音轨：与视频同起同止，时长由我们控制（pw-record 没有 --duration）
-            audio = os.path.join(tmp, 'a.wav')
-            rec = None
-            if not a.no_audio:
-                try:
-                    rec = subprocess.Popen(
-                        ['pw-record', '--rate', '16000', '--channels', '1', audio],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except OSError:
-                    rec = None
+    @staticmethod
+    def _stop_audio(rec):
+        if rec is None:
+            return
+        rec.terminate()
+        try:
+            rec.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            rec.kill()
 
-            time.sleep(a.record_seconds)
+    def _new_segment(self, started, index, kind):
+        tmp = os.path.join(
+            self.args.ring_dir, f'_clip_{int(started * 1000)}_{kind}_{index}')
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        audio, rec = self._start_audio(tmp)
+        with self.state_lock:
+            self.segment_index = index
+            self.segment_started_at = started
+        return tmp, audio, rec
 
-            if rec is not None:
-                rec.terminate()
-                try:
-                    rec.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    rec.kill()
+    def record_event(self, started):
+        """自动事件：持续检测，静止 quiet-seconds 秒结束，超长自动分片。"""
+        a = self.args
+        segment_start = started
+        index = 1
+        tmp = audio = rec = None
+        next_seg = None
+        try:
+            tmp, audio, rec = self._new_segment(segment_start, index, 'auto')
+            while running:
+                this_start = segment_start
+                ended = None
+                reason = 'quiet'
+                # 1 秒一轮；静止判定/分片边界最多晚约 1 秒。
+                while running:
+                    time.sleep(1.0)
+                    now = time.time()
+                    with self.state_lock:
+                        last_motion = self.last_motion_at
+                    quiet = now - last_motion
+                    if quiet >= a.quiet_seconds:
+                        ended, reason = now, 'quiet'
+                        break
+                    if (now - segment_start >= a.max_segment_seconds
+                            and quiet < 3.0):
+                        ended, reason = now, 'max'
+                        break
+                if ended is None:
+                    ended, reason = time.time(), 'stop'
 
-            frames, clip_fps = self.snapshot_ring(tmp, since=started)
-            if frames == 0:
-                print('no hd frames, skip clip', file=sys.stderr, flush=True)
-                return
-            clip_fps = min(60.0, max(1.0, clip_fps))
+                self._stop_audio(rec)
+                rec = None
 
-            date = time.strftime('%Y-%m-%d')
-            hhmmss = time.strftime('%H%M%S', time.localtime(started))
-            folder = os.path.join(a.clip_dir_base, date)
-            os.makedirs(folder, exist_ok=True)
-            clip_path = os.path.join(folder, f'{hhmmss}_{kind}.mp4')
+                next_seg = None
+                if reason == 'max' and running:
+                    # 先起下一段音轨再快照上一段，尽量缩小分片间的音频空隙。
+                    segment_start = ended
+                    index += 1
+                    next_seg = self._new_segment(segment_start, index, 'auto')
 
-            cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
-                   '-framerate', f'{clip_fps:.3f}', '-i',
-                   os.path.join(tmp, 'seq_%08d.jpg')]
-            if rec is not None and os.path.exists(audio) and os.path.getsize(audio) > 1000:
-                cmd += ['-i', audio]
-            else:
-                cmd += ['-an']
-            cmd += ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(a.clip_crf),
-                    '-pix_fmt', 'yuv420p']
-            if rec is not None:
-                cmd += ['-c:a', 'aac', '-b:a', '64k']
-            cmd += ['-shortest', '-movflags', '+faststart', clip_path]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if res.returncode != 0:
-                print(f'ffmpeg clip failed: {res.stderr[-300:]}',
-                      file=sys.stderr, flush=True)
-                clip_path = None
+                self._snapshot_segment('auto', this_start, ended, tmp, audio)
+                tmp = None
+                if next_seg is None:
+                    break
+                tmp, audio, rec = next_seg
+                next_seg = None
         except Exception as exc:  # noqa: BLE001
-            print(f'record error: {exc}', file=sys.stderr, flush=True)
+            print(f'record event error: {exc}', file=sys.stderr, flush=True)
+            self._stop_audio(rec)
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+            if next_seg:
+                self._stop_audio(next_seg[2])
+                shutil.rmtree(next_seg[0], ignore_errors=True)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-            self.busy = False
+            with self.state_lock:
+                self.busy = False
+                self.event_active = False
+                self.segment_index = 0
+                self.segment_started_at = 0.0
+            self.last_trigger = time.time()
             self.hits = 0
+            self.motion_active = False
             # 录像期间占用的是高清分支，帧基准已过期，重新取一帧做参考
             self.prev = None
 
-        if clip_path:
+    def record_manual(self, started):
+        """手动录像保持固定 record-seconds 秒。"""
+        a = self.args
+        tmp = audio = rec = None
+        try:
+            tmp, audio, rec = self._new_segment(started, 1, 'manual')
+            time.sleep(a.record_seconds)
+            ended = time.time()
+            self._stop_audio(rec)
+            rec = None
+            self._snapshot_segment('manual', started, ended, tmp, audio)
+            tmp = None
+        except Exception as exc:  # noqa: BLE001
+            print(f'record manual error: {exc}', file=sys.stderr, flush=True)
+            self._stop_audio(rec)
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+        finally:
+            with self.state_lock:
+                self.busy = False
+                self.segment_index = 0
+                self.segment_started_at = 0.0
+            self.hits = 0
+            self.prev = None
+
+    def _snapshot_segment(self, kind, started, ended, tmp, audio):
+        """立刻按时间窗复制环形帧，再把 ffmpeg 编码丢给后台线程。"""
+        frames, fps = self.snapshot_ring(tmp, since=started, until=ended)
+        if frames == 0:
+            print('no hd frames, skip clip', file=sys.stderr, flush=True)
+            shutil.rmtree(tmp, ignore_errors=True)
+            return
+        fps = min(60.0, max(1.0, fps))
+        self._encode_queue.put((tmp, audio, kind, started, ended, fps, frames))
+
+    def encode_loop(self):
+        """串行编码，避免多段长事件同时跑 ffmpeg 抢 CPU。"""
+        a = self.args
+        while running:
+            try:
+                tmp, audio, kind, started, ended, fps, _ = \
+                    self._encode_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            clip_path = None
+            try:
+                date = time.strftime('%Y-%m-%d')
+                hhmmss = time.strftime('%H%M%S', time.localtime(started))
+                folder = os.path.join(a.clip_dir_base, date)
+                os.makedirs(folder, exist_ok=True)
+                clip_path = self._unique_clip_path(folder, hhmmss, kind)
+
+                cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                       '-framerate', f'{fps:.3f}', '-i',
+                       os.path.join(tmp, 'seq_%08d.jpg')]
+                has_audio = (audio and os.path.exists(audio)
+                             and os.path.getsize(audio) > 1000)
+                if has_audio:
+                    cmd += ['-i', audio, '-c:a', 'aac', '-b:a', '64k']
+                else:
+                    cmd += ['-an']
+                cmd += ['-c:v', 'libx264', '-preset', 'veryfast',
+                        '-crf', str(a.clip_crf), '-pix_fmt', 'yuv420p',
+                        '-shortest', '-movflags', '+faststart', clip_path]
+                res = subprocess.run(cmd, capture_output=True, text=True,
+                                     timeout=300)
+                if res.returncode != 0:
+                    print(f'ffmpeg clip failed: {res.stderr[-300:]}',
+                          file=sys.stderr, flush=True)
+                    clip_path = None
+            except Exception as exc:  # noqa: BLE001
+                print(f'encode error: {exc}', file=sys.stderr, flush=True)
+                clip_path = None
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+                self._encode_queue.task_done()
+
+            if not clip_path:
+                continue
             try:
                 size = os.path.getsize(clip_path)
             except OSError:
                 size = 0
-            self.events_date = self.today()
-            self.events.append({
-                'at': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started)),
-                'kind': kind,
-                'seconds': int(time.time() - started),
-                'bytes': size,
-                'path': os.path.relpath(clip_path, a.clip_dir_base),
-            })
-            self.events = self.events[-200:]
+            with self.state_lock:
+                self.events_date = self.today()
+                self.events.append({
+                    'at': time.strftime('%Y-%m-%d %H:%M:%S',
+                                        time.localtime(started)),
+                    'kind': kind,
+                    'seconds': max(1, int(round(ended - started))),
+                    'bytes': size,
+                    'path': os.path.relpath(clip_path, a.clip_dir_base),
+                })
+                self.events = self.events[-200:]
             print(f'clip saved: {clip_path} ({size // 1024}KB)',
                   file=sys.stderr, flush=True)
 
-    def snapshot_ring(self, tmp, since=None):
+    @staticmethod
+    def _unique_clip_path(folder, hhmmss, kind):
+        path = os.path.join(folder, f'{hhmmss}_{kind}.mp4')
+        suffix = 2
+        while os.path.exists(path):
+            path = os.path.join(folder, f'{hhmmss}_{kind}_{suffix}.mp4')
+            suffix += 1
+        return path
+
+    def snapshot_ring(self, tmp, since=None, until=None):
         """把环形帧复制成从 1 开始的连续序列，返回 (帧数, 实测帧率)。
 
-        since 之后的帧才算本次事件，避免把上一轮残留的旧帧剪进片段。
+        since/until 限定本段的时间窗，避免把上一段或下一段的帧剪进来。
         环形这一路不做限帧，落盘帧率就是摄像头真实出帧率（常见 25/30fps），
         用首尾帧落盘时间的跨度估帧率，交给 ffmpeg 后播放速度才与现实一致。
         """
@@ -400,17 +560,13 @@ class Worker:
                 continue
             if since is not None and mtime < since:
                 continue
+            if until is not None and mtime > until:
+                continue
             names.append(name)
             stamps[name] = mtime
         fps = max(5.0, float(self.args.ring_fps))
         if len(names) >= 2 and stamps[names[-1]] > stamps[names[0]]:
             fps = (len(names) - 1) / (stamps[names[-1]] - stamps[names[0]])
-        keep = int(max(1, self.args.record_seconds) * fps) + 2
-        if len(names) > keep:
-            names = names[-keep:]
-            span = stamps[names[-1]] - stamps[names[0]]
-            if span > 0:
-                fps = (len(names) - 1) / span
         for idx, name in enumerate(names, start=1):
             try:
                 shutil.copyfile(os.path.join(self.args.ring_dir, name),
@@ -456,6 +612,17 @@ class Worker:
             if self.events_date != self.today():
                 self.events_date = self.today()
                 self.events = []
+            with self.state_lock:
+                busy = self.busy
+                event_active = self.event_active
+                segment_index = self.segment_index
+                segment_started = self.segment_started_at
+                last_motion = self.last_motion_at
+                events = list(self.events)
+            quiet_remaining = 0.0
+            if event_active:
+                quiet_remaining = max(
+                    0.0, self.args.quiet_seconds - (time.time() - last_motion))
             write_json(self.args.state_file, {
                 'running': True,
                 'device': self.args.device,
@@ -463,7 +630,12 @@ class Worker:
                 'detect': self.detect_enabled,
                 'sensitivity': self.sensitivity,
                 'motionActive': self.motion_active,
-                'recording': self.busy,
+                'recording': busy,
+                'eventActive': event_active,
+                'segmentIndex': segment_index,
+                'segmentStartedAt': segment_started,
+                'lastMotionAt': last_motion,
+                'quietRemaining': round(quiet_remaining, 1),
                 'lastScore': self.last_score,
                 'lastMean': self.last_mean,
                 'sourceResolution': self.source_resolution,
@@ -471,8 +643,10 @@ class Worker:
                 'previewFpsMeasured': self.preview_fps,
                 'lastTrigger': self.last_trigger,
                 'recordSeconds': self.args.record_seconds,
+                'quietSeconds': self.args.quiet_seconds,
+                'maxSegmentSeconds': self.args.max_segment_seconds,
                 'cooldownSeconds': self.args.cooldown_seconds,
-                'events': list(self.events),
+                'events': events,
                 'imageLib': Image is not None,
             })
 
@@ -491,7 +665,9 @@ def main():
     ap.add_argument('--detect-fps', type=int, default=3)
     ap.add_argument('--confirm-hits', type=int, default=3)
     ap.add_argument('--record-seconds', type=int, default=10)
-    ap.add_argument('--cooldown-seconds', type=int, default=30)
+    ap.add_argument('--quiet-seconds', type=int, default=5)
+    ap.add_argument('--max-segment-seconds', type=int, default=60)
+    ap.add_argument('--cooldown-seconds', type=int, default=0)
     ap.add_argument('--clip-crf', type=int, default=23)
     ap.add_argument('--detect', type=int, default=0)
     ap.add_argument('--sensitivity', default='mid', choices=sorted(SENSITIVITY))
@@ -515,6 +691,7 @@ def main():
         os.makedirs(d, exist_ok=True)
     clean_dir(args.out_dir, 'f_')
     clean_dir(args.ring_dir, 'h_')
+    clean_clip_dirs(args.ring_dir)
 
     worker = Worker(args)
 
@@ -533,7 +710,8 @@ def main():
           file=sys.stderr, flush=True)
 
     threads = [threading.Thread(target=t, daemon=True) for t in
-               (worker.detect_loop, worker.cmd_loop, worker.state_loop)]
+               (worker.detect_loop, worker.cmd_loop, worker.state_loop,
+                worker.encode_loop)]
     for th in threads:
         th.start()
 
@@ -564,6 +742,7 @@ def main():
                                      'stoppedAt': time.strftime('%Y-%m-%d %H:%M:%S')})
         clean_dir(args.out_dir, 'f_')
         clean_dir(args.ring_dir, 'h_')
+        clean_clip_dirs(args.ring_dir)
         print('camera worker stopped', file=sys.stderr, flush=True)
     return rc
 

@@ -132,6 +132,8 @@ public sealed class MonitorService : BackgroundService
                 enabled = Detect.Enabled,
                 sensitivity = Detect.Sensitivity,
                 recordSeconds = _options.RecordSeconds,
+                quietSeconds = _options.QuietSeconds,
+                maxSegmentSeconds = _options.MaxSegmentSeconds,
                 cooldownSeconds = _options.CooldownSeconds,
                 withAudio = _options.ClipWithAudio,
                 imageLib = BoolOf(worker, "imageLib"),
@@ -143,6 +145,11 @@ public sealed class MonitorService : BackgroundService
                     running = BoolOf(worker, "running"),
                     motionActive = BoolOf(worker, "motionActive"),
                     recording = BoolOf(worker, "recording"),
+                    eventActive = BoolOf(worker, "eventActive"),
+                    segmentIndex = IntOf(worker, "segmentIndex"),
+                    quietRemaining = DoubleOf(worker, "quietRemaining"),
+                    segmentStartedAt = DoubleOf(worker, "segmentStartedAt"),
+                    lastMotionAt = DoubleOf(worker, "lastMotionAt"),
                     previewFps = DoubleOf(worker, "previewFpsMeasured"),
                     lastTrigger = DoubleOf(worker, "lastTrigger"),
                     lastScore = DoubleOf(worker, "lastScore"),
@@ -161,6 +168,18 @@ public sealed class MonitorService : BackgroundService
         element is { } root
         && root.TryGetProperty(name, out var value)
         && value.ValueKind == JsonValueKind.True;
+
+    private static int IntOf(JsonElement? element, string name)
+    {
+        if (element is not { } root
+            || !root.TryGetProperty(name, out var value)
+            || value.ValueKind != JsonValueKind.Number)
+        {
+            return 0;
+        }
+
+        return value.TryGetInt32(out var integer) ? integer : 0;
+    }
 
     private static double DoubleOf(JsonElement? element, string name)
     {

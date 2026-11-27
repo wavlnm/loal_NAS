@@ -44,8 +44,18 @@ public sealed class MonitorOptions
     public int ClipHeight { get; set; } = 720;
     public int DetectFps { get; set; } = 3;
     public int ConfirmHits { get; set; } = 3;
+    /// <summary>手动录像的固定时长；自动事件按静止/分片规则结束。</summary>
     public int RecordSeconds { get; set; } = 10;
-    public int CooldownSeconds { get; set; } = 30;
+
+    /// <summary>自动事件连续多久没有检测到运动就结束。</summary>
+    public int QuietSeconds { get; set; } = 5;
+
+    /// <summary>自动事件单段最长时长，超过后仍有运动就分片继续录。</summary>
+    public int MaxSegmentSeconds { get; set; } = 60;
+
+    /// <summary>事件结束后的额外冷却；静止判定本身已起到冷却作用，默认 0。</summary>
+    public int CooldownSeconds { get; set; }
+
     public int ClipCrf { get; set; } = 23;
 
     /// <summary>事件片段是否同时录麦克风音轨。</summary>
