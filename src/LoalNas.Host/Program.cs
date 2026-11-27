@@ -58,6 +58,7 @@ internal static class Program
         builder.Services.Configure<MonitorOptions>(builder.Configuration.GetSection(MonitorOptions.SectionName));
         builder.Services.Configure<ShareOptions>(builder.Configuration.GetSection(ShareOptions.SectionName));
         builder.Services.Configure<ArchiveOptions>(builder.Configuration.GetSection(ArchiveOptions.SectionName));
+        builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection(AgentOptions.SectionName));
         builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
 
         builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
@@ -101,6 +102,13 @@ internal static class Program
         builder.Services.AddHostedService(services => services.GetRequiredService<ShareService>());
         builder.Services.AddSingleton<ArchiveService>();
         builder.Services.AddHostedService(services => services.GetRequiredService<ArchiveService>());
+        builder.Services.AddSingleton<AgentModelConfigStore>();
+        builder.Services.AddSingleton<SensitiveCommandPolicy>();
+        builder.Services.AddSingleton<AgentServeManager>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<AgentServeManager>());
+        builder.Services.AddSingleton<AgentSessionProxy>();
+        builder.Services.AddSingleton<AgentPolicyStore>();
+        builder.Services.AddSingleton<AgentApprovalBroker>();
 
         var app = builder.Build();
         app.UseMiddleware<IpRateLimitMiddleware>();
@@ -108,6 +116,7 @@ internal static class Program
         MapEndpoints(app);
         app.MapShareEndpoints();
         app.MapArchiveEndpoints();
+        app.MapAgentEndpoints();
         return app;
     }
 
@@ -594,7 +603,7 @@ internal static class Program
         return System.Text.Json.JsonSerializer.Serialize(payload);
     }
 
-    private static bool IsLoopback(HttpContext context)
+    internal static bool IsLoopback(HttpContext context)
     {
         var remote = context.Connection.RemoteIpAddress;
         if (remote is null)

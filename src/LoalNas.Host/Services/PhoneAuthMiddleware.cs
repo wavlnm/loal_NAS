@@ -30,6 +30,9 @@ public sealed class PhoneAuthMiddleware
         @"^/s/[A-Za-z0-9_-]{22}(?:/file)?$", RegexOptions.Compiled);
     private static readonly Regex _shareUnlockPath = new(
         @"^/s/[A-Za-z0-9_-]{22}/unlock$", RegexOptions.Compiled);
+    // 插件审批桥：仅本机 POST，handler 内部再做 loopback + bearer 校验。
+    private static readonly Regex _internalApprovalPath = new(
+        @"^/internal/agent/approvals$", RegexOptions.Compiled);
 
     private readonly ConcurrentDictionary<string, long> _seenNonces = new(StringComparer.Ordinal);
     private long _lastCleanupTick = Environment.TickCount64;
@@ -65,6 +68,12 @@ public sealed class PhoneAuthMiddleware
         }
 
         if (HttpMethods.IsPost(context.Request.Method) && _shareUnlockPath.IsMatch(path))
+        {
+            await _next(context);
+            return;
+        }
+
+        if (HttpMethods.IsPost(context.Request.Method) && _internalApprovalPath.IsMatch(path))
         {
             await _next(context);
             return;

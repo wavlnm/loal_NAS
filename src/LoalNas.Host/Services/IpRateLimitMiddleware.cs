@@ -42,7 +42,8 @@ internal sealed class IpRateLimitMiddleware
         var requestPath = context.Request.Path.Value;
         if (requestPath is not null &&
             (requestPath == "/s" ||
-             requestPath.StartsWith("/s/", StringComparison.Ordinal)))
+             requestPath.StartsWith("/s/", StringComparison.Ordinal) ||
+             requestPath.StartsWith("/internal/agent/", StringComparison.Ordinal)))
         {
             await _next(context);
             return;
