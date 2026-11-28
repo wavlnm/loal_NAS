@@ -377,7 +377,10 @@
         const version = latest ? latest.version : -1;
         const url = base + "/state?clientId=" + encodeURIComponent(clientId) +
           "&version=" + encodeURIComponent(String(version)) + "&wait=1";
-        const response = await fetch(url, { cache: "no-store" });
+        const response = await fetch(url, {
+          cache: "no-store",
+          signal: window.AbortSignal?.timeout?.(25000),
+        });
         if (response.status === 404 || response.status === 410) {
           showClosed();
           return;

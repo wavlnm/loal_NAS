@@ -49,6 +49,15 @@ dotnet run -c Release
 ./publish/LoalNas.Host
 ```
 
+构建/更新发布产物（宿主 + 托管应用都要发）：
+
+```bash
+dotnet publish src/LoalNas.Host/LoalNas.Host.csproj -c Release -o publish
+dotnet publish apps/gomoku/LoalNas.Gomoku.csproj -c Release -o publish/apps/gomoku
+```
+
+`publish/apps/<id>/app.json` 会被宿主自动发现；漏发应用时，`/api/apps` 里不会出现该应用。
+
 启动后：
 
 - 对外服务：`http://[::]:5034`（手机/局域网设备访问；有公网 IPv6 时可外网直连）

@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Net;
 
 namespace LoalNas.Host.Services;
 
@@ -112,17 +111,6 @@ internal sealed class IpRateLimitMiddleware
         await _next(context);
     }
 
-    private static string GetClientIp(HttpContext context)
-    {
-        // 优先读代理头（本场景通常无代理，但保留以防将来套 nginx）
-        var forwarded = context.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(forwarded))
-        {
-            var first = forwarded.Split(',')[0].Trim();
-            if (IPAddress.TryParse(first, out _))
-                return first;
-        }
-
-        return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-    }
+    private static string GetClientIp(HttpContext context) =>
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 }
