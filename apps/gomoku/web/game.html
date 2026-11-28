@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#f6f8fc">
+<title>五子棋</title>
+<style>
+  :root {
+    --bg: #f4f6fb;
+    --card: #ffffff;
+    --border: #e3e8f1;
+    --text: #1c2028;
+    --muted: #77808f;
+    --accent: #316bff;
+    --danger: #d64553;
+    --ok: #1aa268;
+    --wood: #e7bf80;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 50% -10%, #ffffff 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: "Segoe UI", "Noto Sans CJK SC", "PingFang SC", system-ui, sans-serif;
+    display: flex;
+    justify-content: center;
+  }
+  .app {
+    width: 100%;
+    max-width: 560px;
+    padding: 18px 16px 28px;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .brand { font-size: 21px; font-weight: 800; letter-spacing: .04em; display: flex; align-items: center; gap: 8px; }
+  .tag { font-size: 11px; font-weight: 600; color: var(--muted); background: #eef1f7; border-radius: 999px; padding: 4px 9px; letter-spacing: .02em; }
+  .status { font-size: 13px; font-weight: 700; color: var(--accent); text-align: right; }
+  .players { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .player { display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--border); border-radius: 13px; padding: 9px 11px; min-width: 0; }
+  .player.right { justify-content: flex-end; text-align: right; }
+  .player b { display: block; font-size: 13px; }
+  .player small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 96px; }
+  .dot { width: 18px; height: 18px; border-radius: 50%; flex: 0 0 auto; }
+  .dot.black { background: radial-gradient(circle at 32% 28%, #5a6272, #12161e 70%); }
+  .dot.white { background: radial-gradient(circle at 32% 28%, #ffffff, #c8ced9 75%); border: 1px solid #b8bfca; }
+  .turn { font-size: 11px; font-weight: 700; color: var(--muted); background: #eef1f7; border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
+  .notice { min-height: 20px; font-size: 13px; line-height: 1.6; color: var(--muted); margin: 0 2px 10px; }
+  .notice b { color: var(--text); }
+  .board-wrap { display: flex; justify-content: center; }
+  canvas { border-radius: 15px; box-shadow: 0 14px 34px rgba(46, 62, 92, .16); display: block; touch-action: manipulation; cursor: pointer; }
+  canvas.waiting { cursor: default; }
+  .meta { display: flex; justify-content: space-between; gap: 10px; margin: 11px 2px 0; font-size: 12px; color: var(--muted); }
+  .meta b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+  button { font: inherit; font-size: 13px; font-weight: 700; border-radius: 11px; padding: 10px 16px; border: 1px solid var(--border); background: #fff; color: var(--text); cursor: pointer; transition: transform .08s ease, background .15s ease; }
+  button:active { transform: scale(.97); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: #fff; border-color: #f0c6cb; color: var(--danger); }
+  button.ghost { background: #fff; }
+  button[hidden] { display: none !important; }
+  .hint { margin: 16px 2px 0; font-size: 11px; line-height: 1.7; color: var(--muted); }
+  .toast { position: fixed; left: 50%; bottom: 34px; transform: translate(-50%, 16px); background: rgba(24, 29, 38, .92); color: #fff; font-size: 13px; padding: 10px 15px; border-radius: 10px; opacity: 0; pointer-events: none; transition: opacity .18s ease, transform .18s ease; max-width: 86vw; text-align: center; }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .closed-note { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 30px 22px; text-align: center; }
+  .closed-note h2 { font-size: 18px; margin: 0 0 10px; }
+  .closed-note p { color: var(--muted); font-size: 13px; line-height: 1.8; margin: 0; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">五子棋 <span class="tag" id="roomTag">房间</span></div>
+    <div class="status" id="statusText">连接中…</div>
+  </header>
+
+  <section class="players">
+    <div class="player">
+      <span class="dot black"></span>
+      <div><b>黑棋</b><small id="blackName">等待加入</small></div>
+    </div>
+    <div class="turn" id="turnBadge">准备中</div>
+    <div class="player right">
+      <div><b>白棋</b><small id="whiteName">等待加入</small></div>
+      <span class="dot white"></span>
+    </div>
+  </section>
+
+  <div class="notice" id="notice"></div>
+
+  <div class="board-wrap" id="boardWrap">
+    <canvas id="board"></canvas>
+  </div>
+
+  <section class="meta">
+    <span id="timeText">—</span>
+    <span id="seatText">—</span>
+  </section>
+
+  <section class="actions">
+    <button id="copyBtn" class="ghost">复制房间链接</button>
+    <button id="resignBtn" class="danger" hidden>认输</button>
+    <button id="rematchBtn" class="primary" hidden>再来一局</button>
+    <button id="acceptBtn" class="primary" hidden>接受再来一局</button>
+    <button id="declineBtn" class="ghost" hidden>拒绝</button>
+  </section>
+
+  <p class="hint">每步限时 <b id="timeoutText">—</b> 秒，超时判负；连成 5 子或以上获胜。房间关闭后链接立即失效。</p>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  const path = location.pathname.replace(/\/+$/, "");
+  const token = path.split("/").pop() || "";
+  const base = path;
+  const hostKey = new URLSearchParams(location.search).get("key") || "";
+
+  const clientId = getClientId();
+  let latest = null;
+  let serverOffset = 0;
+  let stopped = false;
+  let toastTimer = 0;
+
+  const el = {
+    status: document.getElementById("statusText"),
+    roomTag: document.getElementById("roomTag"),
+    blackName: document.getElementById("blackName"),
+    whiteName: document.getElementById("whiteName"),
+    turnBadge: document.getElementById("turnBadge"),
+    notice: document.getElementById("notice"),
+    board: document.getElementById("board"),
+    boardWrap: document.getElementById("boardWrap"),
+    timeText: document.getElementById("timeText"),
+    seatText: document.getElementById("seatText"),
+    timeoutText: document.getElementById("timeoutText"),
+    copyBtn: document.getElementById("copyBtn"),
+    resignBtn: document.getElementById("resignBtn"),
+    rematchBtn: document.getElementById("rematchBtn"),
+    acceptBtn: document.getElementById("acceptBtn"),
+    declineBtn: document.getElementById("declineBtn"),
+    toast: document.getElementById("toast"),
+  };
+
+  const ctx = el.board.getContext("2d");
+  const view = { size: 0, pad: 0, step: 0 };
+
+  function getClientId() {
+    const key = "gomoku.client";
+    let value = null;
+    try { value = localStorage.getItem(key); } catch (_) {}
+    if (!value) {
+      value = randomId();
+      try { localStorage.setItem(key, value); } catch (_) {}
+    }
+    return value;
+  }
+
+  function randomId() {
+    if (window.crypto && crypto.randomUUID) {
+      return crypto.randomUUID().replace(/-/g, "");
+    }
+    const bytes = new Uint8Array(16);
+    if (window.crypto && crypto.getRandomValues) {
+      crypto.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  function resizeBoard() {
+    const width = el.boardWrap.clientWidth || 320;
+    const size = Math.max(240, Math.min(520, Math.floor(width)));
+    const dpr = window.devicePixelRatio || 1;
+    el.board.style.width = size + "px";
+    el.board.style.height = size + "px";
+    el.board.width = Math.round(size * dpr);
+    el.board.height = Math.round(size * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    view.size = size;
+    view.pad = Math.round(size * 0.045);
+    view.step = (size - view.pad * 2) / 14;
+    drawBoard();
+  }
+
+  function drawBoard() {
+    if (!view.size) return;
+    const { size, pad, step } = view;
+
+    ctx.clearRect(0, 0, size, size);
+    const bg = ctx.createLinearGradient(0, 0, size, size);
+    bg.addColorStop(0, "#efcc92");
+    bg.addColorStop(1, "#dfb271");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, size, size);
+
+    ctx.strokeStyle = "rgba(88, 59, 24, .72)";
+    ctx.lineWidth = Math.max(0.7, size / 720);
+    ctx.beginPath();
+    for (let i = 0; i < 15; i++) {
+      const p = pad + i * step;
+      ctx.moveTo(pad, p);
+      ctx.lineTo(size - pad, p);
+      ctx.moveTo(p, pad);
+      ctx.lineTo(p, size - pad);
+    }
+    ctx.stroke();
+
+    const stars = [[3, 3], [11, 3], [7, 7], [3, 11], [11, 11]];
+    ctx.fillStyle = "rgba(70, 45, 16, .8)";
+    for (const [x, y] of stars) {
+      ctx.beginPath();
+      ctx.arc(pad + x * step, pad + y * step, Math.max(2, step * 0.08), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const board = latest && latest.board;
+    if (board) {
+      for (let y = 0; y < 15; y++) {
+        for (let x = 0; x < 15; x++) {
+          const color = board[y][x];
+          if (color) drawStone(x, y, color, false);
+        }
+      }
+    }
+
+    if (latest && latest.lastMove) {
+      const { x, y } = latest.lastMove;
+      ctx.beginPath();
+      ctx.arc(pad + x * step, pad + y * step, Math.max(2.5, step * 0.14), 0, Math.PI * 2);
+      ctx.fillStyle = "#e04848";
+      ctx.fill();
+    }
+  }
+
+  function drawStone(x, y, color, highlight) {
+    const cx = view.pad + x * view.step;
+    const cy = view.pad + y * view.step;
+    const r = view.step * 0.42;
+    const gradient = ctx.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.12, cx, cy, r);
+    if (color === 1) {
+      gradient.addColorStop(0, "#66707f");
+      gradient.addColorStop(1, "#11151d");
+    } else {
+      gradient.addColorStop(0, "#ffffff");
+      gradient.addColorStop(1, "#c4cad5");
+    }
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = gradient;
+    ctx.fill();
+    ctx.lineWidth = Math.max(0.8, view.size / 640);
+    ctx.strokeStyle = color === 1 ? "#0b0f15" : "#a3aab6";
+    ctx.stroke();
+
+    if (highlight) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.45, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(49, 107, 255, .9)";
+      ctx.lineWidth = Math.max(1.4, view.step * 0.08);
+      ctx.stroke();
+    }
+  }
+
+  function apply(snapshot) {
+    if (!snapshot || stopped) return;
+    latest = snapshot;
+    serverOffset = snapshot.serverTime - Date.now();
+    updateUi();
+    drawBoard();
+  }
+
+  function updateUi() {
+    const s = latest;
+    if (!s || stopped) return;
+
+    const myColor = s.yourColor;
+    el.roomTag.textContent = "房间 " + token.slice(0, 6).toUpperCase();
+    el.timeoutText.textContent = String(s.moveTimeoutSeconds);
+    el.seatText.textContent = myColor === 1 ? "你执黑" : myColor === 2 ? "你执白" : "观战中";
+
+    el.blackName.textContent = s.blackSeated ? (myColor === 1 ? "你" : "已加入") : "等待加入";
+    el.whiteName.textContent = s.whiteSeated ? (myColor === 2 ? "你" : "已加入") : "等待加入";
+
+    el.board.classList.toggle("waiting", s.status !== "playing");
+
+    const isMyTurn = s.status === "playing" && myColor !== 0 && s.turn === myColor;
+    el.turnBadge.textContent = s.status === "playing"
+      ? (s.turn === 1 ? "黑棋回合" : "白棋回合")
+      : s.status === "waiting" ? "准备中" : "已结束";
+
+    el.status.textContent = s.status === "waiting"
+      ? (s.blackSeated && !s.whiteSeated ? "等待对手加入…" : "准备中…")
+      : s.status === "playing"
+        ? (isMyTurn ? "轮到你落子" : (myColor === 0 ? "对局进行中" : "等待对方落子…"))
+        : resultText(s);
+
+    if (s.status === "waiting") {
+      el.notice.innerHTML = myColor === 1
+        ? "把房间链接发给好友，对方加入后自动开始。"
+        : "等待房主加入…";
+    } else if (s.status === "finished") {
+      if (myColor === 0) {
+        el.notice.textContent = resultText(s) + "。";
+      } else if (s.rematchRequestedBy === 3 - myColor) {
+        el.notice.innerHTML = "<b>对方想再来一局。</b>接受后交换黑白，重新开局。";
+      } else if (s.rematchRequestedBy === myColor) {
+        el.notice.textContent = "已发出「再来一局」邀请，等待对方接受…";
+      } else {
+        el.notice.textContent = "点「再来一局」邀请对方；双方同意后交换黑白。";
+      }
+    } else {
+      el.notice.textContent = isMyTurn ? "点击棋盘交叉点落子。" : "对方思考中…";
+    }
+
+    const showRematch = s.status === "finished" && myColor !== 0 && s.rematchRequestedBy !== myColor;
+    const showAccept = s.status === "finished" && myColor !== 0 &&
+      s.rematchRequestedBy !== 0 && s.rematchRequestedBy !== myColor;
+
+    el.resignBtn.hidden = !(s.status === "playing" && myColor !== 0);
+    el.rematchBtn.hidden = !showRematch;
+    el.rematchBtn.textContent = "再来一局";
+    el.acceptBtn.hidden = !showAccept;
+    el.declineBtn.hidden = !showAccept;
+    el.copyBtn.hidden = false;
+    el.copyBtn.textContent = myColor === 1 ? "复制房间链接" : "复制房间链接";
+  }
+
+  function resultText(s) {
+    if (s.winner === 3) return "和棋";
+    const name = s.winner === 1 ? "黑棋" : "白棋";
+    if (s.endReason === "five") return name + "五连获胜";
+    if (s.endReason === "timeout") return name + "获胜（对方超时）";
+    if (s.endReason === "resign") return name + "获胜（对方认输）";
+    return name + "获胜";
+  }
+
+  function tickClock() {
+    if (!latest) return;
+    if (latest.status === "playing" && latest.deadline > 0) {
+      const remaining = Math.max(0, Math.ceil((latest.deadline - (Date.now() + serverOffset)) / 1000));
+      el.timeText.innerHTML = "本步剩余 <b>" + remaining + "</b> 秒";
+    } else if (latest.status === "waiting") {
+      el.timeText.textContent = "尚未开始";
+    } else {
+      el.timeText.textContent = "对局已结束";
+    }
+  }
+
+  async function join() {
+    try {
+      const response = await fetch(base + "/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ clientId: clientId, hostKey: hostKey || null }),
+      });
+      if (response.status === 404 || response.status === 410) {
+        showClosed();
+        return;
+      }
+      if (!response.ok) throw new Error("join " + response.status);
+      apply(await response.json());
+      startPolling();
+    } catch (error) {
+      toast("连接失败，正在重试…");
+      setTimeout(join, 1500);
+    }
+  }
+
+  async function startPolling() {
+    while (!stopped) {
+      try {
+        const version = latest ? latest.version : -1;
+        const url = base + "/state?clientId=" + encodeURIComponent(clientId) +
+          "&version=" + encodeURIComponent(String(version)) + "&wait=1";
+        const response = await fetch(url, { cache: "no-store" });
+        if (response.status === 404 || response.status === 410) {
+          showClosed();
+          return;
+        }
+        if (!response.ok) throw new Error("state " + response.status);
+        apply(await response.json());
+      } catch (error) {
+        if (stopped) return;
+        await sleep(1200);
+      }
+    }
+  }
+
+  async function sendAction(pathname, body) {
+    try {
+      const response = await fetch(base + pathname, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify(body),
+      });
+      if (response.status === 404 || response.status === 410) {
+        showClosed();
+        return null;
+      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        toast(errorText(data.error));
+        return null;
+      }
+      apply(data);
+      return data;
+    } catch (error) {
+      toast("网络异常，请重试");
+      return null;
+    }
+  }
+
+  function errorText(code) {
+    switch (code) {
+      case "occupied": return "这里有棋子了";
+      case "not_your_turn": return "还没轮到你";
+      case "not_seated": return "观战者不能操作";
+      case "not_playing": return "当前不能落子";
+      case "not_finished": return "对局尚未结束";
+      case "no_request": return "对方还没有发起邀请";
+      case "waiting_opponent": return "等待对方接受";
+      case "opponent_missing": return "对方已离开，无法再来一局";
+      case "out_of_range": return "落子位置超出棋盘";
+      default: return "操作失败：" + (code || "unknown");
+    }
+  }
+
+  function showClosed() {
+    if (stopped) return;
+    stopped = true;
+    el.status.textContent = "房间已关闭";
+    el.notice.textContent = "";
+    el.timeText.textContent = "—";
+    el.seatText.textContent = "—";
+    el.boardWrap.innerHTML =
+      '<div class="closed-note"><h2>房间已关闭或已过期</h2>' +
+      '<p>请让房主在千私云手机端重新创建房间，再打开新的链接。</p></div>';
+    el.resignBtn.hidden = true;
+    el.rematchBtn.hidden = true;
+    el.acceptBtn.hidden = true;
+    el.declineBtn.hidden = true;
+    el.copyBtn.hidden = true;
+  }
+
+  function copyLink() {
+    const link = location.origin + base;
+    const done = () => toast("房间链接已复制");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(link).then(done).catch(() => fallbackCopy(link, done));
+    } else {
+      fallbackCopy(link, done);
+    }
+  }
+
+  function fallbackCopy(text, done) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+      done();
+    } catch (_) {
+      prompt("复制房间链接：", text);
+    } finally {
+      document.body.removeChild(area);
+    }
+  }
+
+  function toast(message) {
+    el.toast.textContent = message;
+    el.toast.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.toast.classList.remove("show"), 2200);
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  el.board.addEventListener("pointerdown", event => {
+    if (!latest || latest.status !== "playing") return;
+    if (!latest.yourColor) { toast("观战者不能落子"); return; }
+    if (latest.turn !== latest.yourColor) { toast("还没轮到你"); return; }
+
+    const rect = el.board.getBoundingClientRect();
+    const x = Math.round((event.clientX - rect.left - view.pad) / view.step);
+    const y = Math.round((event.clientY - rect.top - view.pad) / view.step);
+    if (x < 0 || x > 14 || y < 0 || y > 14) return;
+    if (latest.board[y][x] !== 0) return;
+
+    sendAction("/move", { clientId: clientId, x: x, y: y });
+  });
+
+  el.resignBtn.addEventListener("click", () => {
+    if (confirm("确定认输吗？")) {
+      sendAction("/resign", { clientId: clientId });
+    }
+  });
+
+  el.rematchBtn.addEventListener("click", () => {
+    sendAction("/rematch", { clientId: clientId, action: "request" });
+  });
+
+  el.acceptBtn.addEventListener("click", () => {
+    sendAction("/rematch", { clientId: clientId, action: "accept" });
+  });
+
+  el.declineBtn.addEventListener("click", () => {
+    sendAction("/rematch", { clientId: clientId, action: "decline" });
+  });
+
+  el.copyBtn.addEventListener("click", copyLink);
+
+  window.addEventListener("resize", resizeBoard);
+  window.addEventListener("orientationchange", () => setTimeout(resizeBoard, 120));
+
+  resizeBoard();
+  el.roomTag.textContent = "房间 " + token.slice(0, 6).toUpperCase();
+  setInterval(tickClock, 250);
+  join();
+})();
+</script>
+</body>
+</html>

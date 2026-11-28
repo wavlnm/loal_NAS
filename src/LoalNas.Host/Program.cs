@@ -61,6 +61,7 @@ internal static class Program
         builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection(AgentOptions.SectionName));
         builder.Services.Configure<PrivacyOptions>(builder.Configuration.GetSection(PrivacyOptions.SectionName));
         builder.Services.Configure<FileBrowserOptions>(builder.Configuration.GetSection(FileBrowserOptions.SectionName));
+        builder.Services.Configure<AppsOptions>(builder.Configuration.GetSection(AppsOptions.SectionName));
 
         builder.Services.AddHttpClient(FileBrowserApiProxy.HttpClientName, client =>
         {
@@ -73,6 +74,26 @@ internal static class Program
         });
 
         builder.Services.AddHttpClient(MediaRelayService.HttpClientName, client =>
+        {
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.None
+        });
+
+        builder.Services.AddHttpClient(AppProcessManager.ControlClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(20);
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.None
+        });
+
+        builder.Services.AddHttpClient(AppProxy.HttpClientName, client =>
         {
             client.Timeout = Timeout.InfiniteTimeSpan;
         }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
@@ -111,6 +132,12 @@ internal static class Program
         builder.Services.AddSingleton<AgentSessionProxy>();
         builder.Services.AddSingleton<AgentPolicyStore>();
         builder.Services.AddSingleton<AgentApprovalBroker>();
+        builder.Services.AddSingleton<AppRegistry>();
+        builder.Services.AddSingleton<AppProcessManager>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<AppProcessManager>());
+        builder.Services.AddSingleton<AppRoomService>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<AppRoomService>());
+        builder.Services.AddSingleton<AppProxy>();
 
         var app = builder.Build();
         app.UseMiddleware<IpRateLimitMiddleware>();
@@ -120,6 +147,7 @@ internal static class Program
         app.MapArchiveEndpoints();
         app.MapAgentEndpoints();
         app.MapPrivacyEndpoints();
+        app.MapAppEndpoints();
         return app;
     }
 
@@ -514,6 +542,21 @@ internal static class Program
                 }
 
                 await proxy.ProxyApiAsync(context, path);
+            });
+
+        // ── 通用应用/游戏代理：/apps/{appId}/... ──────────────────────────────
+        app.MapMethods("/apps/{**path}", proxyMethods,
+            async (HttpContext context, AppRegistry registry, AppProxy proxy) =>
+            {
+                var path = context.Request.Path.Value ?? string.Empty;
+                if (!registry.TryResolvePath(path, out var manifest, out var restPath))
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    await context.Response.WriteAsJsonAsync(new { error = "app_not_found" });
+                    return;
+                }
+
+                await proxy.HandleAsync(context, manifest, restPath);
             });
 
         // ── 本地回环面板：展示配对二维码，完成密钥传递 ──────────────────────────

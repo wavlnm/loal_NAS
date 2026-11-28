@@ -1,0 +1,32 @@
+{
+  "id": "gomoku",
+  "name": "五子棋",
+  "contractVersion": 1,
+  "enabled": true,
+  "command": "dotnet",
+  "args": [
+    "LoalNas.Gomoku.dll",
+    "--port",
+    "{port}",
+    "--base-path",
+    "{basePath}",
+    "--control-token",
+    "{controlToken}",
+    "--data-dir",
+    "{dataDir}"
+  ],
+  "workingDirectory": "",
+  "healthPath": "/health",
+  "startupTimeoutSeconds": 30,
+  "publicPrefix": "/apps/gomoku",
+  "publicRoutes": [
+    "",
+    "/{token}",
+    "/{token}/{path...}"
+  ],
+  "roomModel": "managed",
+  "maxRooms": 8,
+  "defaultRoomLifetimeHours": 6,
+  "maxRoomLifetimeHours": 24,
+  "dataDirectoryName": "gomoku"
+}

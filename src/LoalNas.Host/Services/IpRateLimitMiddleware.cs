@@ -43,6 +43,8 @@ internal sealed class IpRateLimitMiddleware
         if (requestPath is not null &&
             (requestPath == "/s" ||
              requestPath.StartsWith("/s/", StringComparison.Ordinal) ||
+             requestPath == "/apps" ||
+             requestPath.StartsWith("/apps/", StringComparison.Ordinal) ||
              requestPath.StartsWith("/internal/agent/", StringComparison.Ordinal)))
         {
             await _next(context);

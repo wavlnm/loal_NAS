@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>LoalNas.Gomoku</RootNamespace>
+    <AssemblyName>LoalNas.Gomoku</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="web/game.html" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="app.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

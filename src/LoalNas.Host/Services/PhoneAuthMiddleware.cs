@@ -39,12 +39,18 @@ public sealed class PhoneAuthMiddleware
 
     private readonly RequestDelegate _next;
     private readonly DeviceIdentityService _identity;
+    private readonly AppRegistry _apps;
     private readonly ILogger<PhoneAuthMiddleware> _logger;
 
-    public PhoneAuthMiddleware(RequestDelegate next, DeviceIdentityService identity, ILogger<PhoneAuthMiddleware> logger)
+    public PhoneAuthMiddleware(
+        RequestDelegate next,
+        DeviceIdentityService identity,
+        AppRegistry apps,
+        ILogger<PhoneAuthMiddleware> logger)
     {
         _next = next;
         _identity = identity;
+        _apps = apps;
         _logger = logger;
     }
 
@@ -74,6 +80,13 @@ public sealed class PhoneAuthMiddleware
         }
 
         if (HttpMethods.IsPost(context.Request.Method) && _internalApprovalPath.IsMatch(path))
+        {
+            await _next(context);
+            return;
+        }
+
+        // 应用公开路由（清单 publicRoutes 决定）：由应用自身的房间令牌鉴权，不要求手机端 HMAC。
+        if (_apps.IsPublicPath(path))
         {
             await _next(context);
             return;
