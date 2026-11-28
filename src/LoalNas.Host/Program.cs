@@ -103,6 +103,17 @@ internal static class Program
             AutomaticDecompression = DecompressionMethods.None
         });
 
+        builder.Services.AddHttpClient(LyricsEndpoints.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("nas-phone/1.0");
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.None
+        });
+
         builder.Services.AddSingleton<FileBrowserProcessManager>();
         builder.Services.AddHostedService(services => services.GetRequiredService<FileBrowserProcessManager>());
         builder.Services.AddSingleton<FileBrowserApiProxy>();
@@ -148,6 +159,7 @@ internal static class Program
         app.MapAgentEndpoints();
         app.MapPrivacyEndpoints();
         app.MapAppEndpoints();
+        app.MapLyricsEndpoints();
         return app;
     }
 
