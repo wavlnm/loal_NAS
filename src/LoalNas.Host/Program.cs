@@ -114,6 +114,20 @@ internal static class Program
             AutomaticDecompression = DecompressionMethods.None
         });
 
+        // 网易云、QQ 音乐的网页接口需要浏览器 UA 和 Referer。
+        builder.Services.AddHttpClient(LyricsProviders.BrowserHttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = true,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.All
+        });
+
         builder.Services.AddSingleton<FileBrowserProcessManager>();
         builder.Services.AddHostedService(services => services.GetRequiredService<FileBrowserProcessManager>());
         builder.Services.AddSingleton<FileBrowserApiProxy>();

@@ -1,7 +1,7 @@
 namespace LoalNas.Host.Services;
 
 /// <summary>
-/// 歌词查询代理：手机到 LRCLIB 经常超时，由 NAS 代查再返回搜索结果。
+/// 歌词查询：手机直接查外网经常超时，由 NAS 代查多个歌词源再合并返回。
 /// </summary>
 public static class LyricsEndpoints
 {
@@ -24,47 +24,52 @@ public static class LyricsEndpoints
                 return Results.Json(new { error = "invalid_query" }, statusCode: 400);
             }
 
-            var query = $"track_name={Uri.EscapeDataString(track)}";
-            if (!string.IsNullOrWhiteSpace(artist))
+            var candidates = await LyricsProviders
+                .SearchAsync(clients, track, artist, ct)
+                .ConfigureAwait(false);
+
+            return Results.Json(candidates.Select(candidate => new
             {
-                query += $"&artist_name={Uri.EscapeDataString(artist)}";
+                trackName = candidate.TrackName,
+                artistName = candidate.ArtistName,
+                syncedLyrics = candidate.SyncedLyrics,
+                plainLyrics = candidate.PlainLyrics,
+                duration = candidate.Duration,
+                source = candidate.Source
+            }));
+        });
+
+        // 手机端只传文件名和时长，由电脑端多源拉取、挑选最优并写入共享目录缓存。
+        app.MapGet("/api/music/lyrics/best", async (
+            string? name, double? duration,
+            IHttpClientFactory clients,
+            FileBrowserProcessManager manager,
+            CancellationToken ct) =>
+        {
+            name = name?.Trim();
+            if (string.IsNullOrWhiteSpace(name) || name.Length > MaxTextLength + 100)
+            {
+                return Results.Json(new { error = "invalid_query" }, statusCode: 400);
             }
 
-            try
+            var found = await LyricsSelection
+                .FindBestAsync(clients, name, duration, ct)
+                .ConfigureAwait(false);
+            if (found == null)
             {
-                using var response = await clients.CreateClient(HttpClientName)
-                    .GetAsync($"https://lrclib.net/api/search?{query}", ct)
-                    .ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                {
-                    return Results.Json(
-                        new { error = "lyrics_unavailable" },
-                        statusCode: StatusCodes.Status502BadGateway);
-                }
+                return Results.Json(new { error = "lyrics_not_found" }, statusCode: 404);
+            }
 
-                var json = await response.Content.ReadAsStringAsync(ct)
-                    .ConfigureAwait(false);
-                if (json.Length > 2 * 1024 * 1024)
-                {
-                    return Results.Json(
-                        new { error = "lyrics_too_large" },
-                        statusCode: StatusCodes.Status502BadGateway);
-                }
-
-                return Results.Text(json, "application/json; charset=utf-8");
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            var (candidate, lyrics) = found.Value;
+            var key = LyricsSelection.KeyFromFileName(name);
+            var saved = LyricsSelection.SaveToShare(manager.SharedRootPath, key, lyrics);
+            return Results.Json(new
             {
-                return Results.Json(
-                    new { error = "lyrics_timeout" },
-                    statusCode: StatusCodes.Status504GatewayTimeout);
-            }
-            catch (HttpRequestException)
-            {
-                return Results.Json(
-                    new { error = "lyrics_unavailable" },
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
+                title = candidate.TrackName,
+                lyrics,
+                source = candidate.Source,
+                saved
+            });
         });
     }
 }
