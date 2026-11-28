@@ -40,7 +40,7 @@ public sealed class AgentSessionProxy
     {
         using var response = await _serve.SendAsync(
             HttpMethod.Get,
-            $"/api/session/{SessionId(sessionId)}/message?limit={Math.Clamp(limit, 1, 500)}&order=asc",
+            $"/api/session/{SessionId(sessionId)}/message?limit={Math.Clamp(limit, 1, 500)}&order=desc",
             null, ct).ConfigureAwait(false);
         return await ReadAsync(response, ct).ConfigureAwait(false);
     }

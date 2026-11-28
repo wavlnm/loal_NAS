@@ -803,7 +803,8 @@ public static class AgentEndpoints
         }
 
         var result = new List<object>();
-        foreach (var item in data.EnumerateArray())
+        // 代理按最新优先取窗口，这里恢复成时间正序再返回给手机。
+        foreach (var item in data.EnumerateArray().Reverse())
         {
             var type = item.TryGetProperty("type", out var typeValue)
                 ? typeValue.GetString() ?? ""
